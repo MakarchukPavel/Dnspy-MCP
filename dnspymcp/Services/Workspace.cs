@@ -14,8 +14,15 @@ namespace DnSpyMcp.Services;
 /// reference in every tool call.
 ///
 /// Keys are absolute file paths. One asm_file is one .dll / .exe.
+///
+/// Deliberately NOT IDisposable: per-tenant Workspace instances are reached
+/// through a scoped DI factory, and MS DI tracks every IDisposable returned
+/// from a scoped factory and calls Dispose at scope end. That would close
+/// every asm after every request, defeating the whole "open once, query many"
+/// model. Cleanup is driven explicitly via <see cref="CloseAll"/> from
+/// <see cref="TenantContext"/> when the tenant (or host) goes away.
 /// </summary>
-public sealed class Workspace : IDisposable
+public sealed class Workspace
 {
     public sealed class OpenedAsm(string path, ModuleDefMD module, CSharpDecompiler decompiler, PEFile peFile)
     {
@@ -98,12 +105,12 @@ public sealed class Workspace : IDisposable
         if (string.IsNullOrEmpty(path))
         {
             if (_current == null || !_open.TryGetValue(_current, out var cur))
-                throw new McpException("no active asm_file. Open one via asm_file_open or set it via asm_file_switch.");
+                throw new McpException("no active asm_file in this tenant's workspace. Call reverse_open to open one (or reverse_switch to set the active slot if you have one open already).");
             return cur;
         }
         var full = System.IO.Path.GetFullPath(path);
         if (!_open.TryGetValue(full, out var a))
-            throw new McpException($"asm_file not opened: {full}. Call asm_file_open first.");
+            throw new McpException($"asm_file not opened in this tenant's workspace: {full}. Call reverse_open with this path first (use reverse_list to see what IS currently open under this Bearer).");
         return a;
     }
 
@@ -113,7 +120,7 @@ public sealed class Workspace : IDisposable
     {
         var full = System.IO.Path.GetFullPath(path);
         if (!_open.TryGetValue(full, out var a))
-            throw new McpException($"asm_file not opened: {full}. Call asm_file_open first.");
+            throw new McpException($"asm_file not opened in this tenant's workspace: {full}. Call reverse_open first, or use reverse_list to see what IS open.");
         _current = full;
         return a;
     }
@@ -121,10 +128,11 @@ public sealed class Workspace : IDisposable
     public IEnumerable<OpenedAsm> All => _open.Values;
 
     /// <summary>
-    /// Close every opened asm — called by the DI container when the host shuts
-    /// down so on-disk files never stay locked after MCP exits.
+    /// Close every opened asm — invoked by <see cref="TenantContext.Dispose"/>
+    /// (and ultimately by the host shutdown that disposes <see cref="TenantStore"/>)
+    /// so on-disk files never stay locked after MCP exits.
     /// </summary>
-    public void Dispose()
+    public void CloseAll()
     {
         foreach (var path in _open.Keys.ToArray())
             Close(path);

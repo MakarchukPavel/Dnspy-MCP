@@ -13,8 +13,10 @@ from typing import Any
 
 
 class MCPClient:
-    def __init__(self, endpoint: str):
+    def __init__(self, endpoint: str, bearer: str | None = "pytest-default-tenant"):
+        """bearer=None / empty => no Authorization header is sent (anonymous tenant)."""
         self.endpoint = endpoint
+        self.bearer = bearer
         self.session_id: str | None = None
         self._id = 0
 
@@ -28,6 +30,8 @@ class MCPClient:
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
+        if self.bearer:
+            headers["Authorization"] = f"Bearer {self.bearer}"
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         req = urllib.request.Request(self.endpoint, data=data, method="POST", headers=headers)

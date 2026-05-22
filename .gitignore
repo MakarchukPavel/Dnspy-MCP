@@ -46,3 +46,6 @@ TestResult.xml
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Claude Code (local agent settings / memory)
+.claude/
