@@ -1,7 +1,4 @@
-using System.Buffers;
 using System.Globalization;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using ModelContextProtocol;
 
 namespace DnSpyMcp.Services;
@@ -16,6 +13,13 @@ namespace DnSpyMcp.Services;
 /// trimmed; <c>_</c> separators are stripped. Throws <see cref="McpException"/>
 /// with the parameter name baked into the message so the LLM sees exactly
 /// which field went wrong.
+///
+/// MCP tool parameters that carry addresses, metadata tokens, or file/IL
+/// offsets take a plain <c>string</c> and call into here. We deliberately
+/// don't wrap in a struct with a JsonConverter — System.Text.Json's schema
+/// exporter then emits <c>true</c> (any-of) for the type, and the Anthropic
+/// API rejects the whole tool catalog when it sees a non-object schema in
+/// inputSchema.properties.
 /// </summary>
 public static class Numbers
 {
@@ -23,10 +27,6 @@ public static class Numbers
     {
         var (body, neg, baseN) = Strip(raw, field);
         if (neg) throw new McpException($"{field}: negative value not allowed for an unsigned 64-bit number ('{raw}').");
-        // Dispatch BEFORE ulong.TryParse — its NumberStyles.None still happily
-        // reads a string like "0o600000010" (after the 0o is stripped, the
-        // tail is all 0-9, so it'd parse as decimal). Each base goes down its
-        // own path; binary/octal share the manual ParseFromDigits walker.
         return baseN switch
         {
             10 => ulong.TryParse(body, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)
@@ -127,51 +127,4 @@ public static class Numbers
         16 => "hex",
         _ => $"base-{b}",
     };
-}
-
-/// <summary>
-/// JSON-parameter wrapper that accepts a numeric value EITHER as a JSON number
-/// (decimal, no prefix) OR as a JSON string with optional base prefix
-/// (<c>0x</c>/<c>0o</c>/<c>0b</c>). Used for tool parameters where it's
-/// natural to type an address or metadata token in hex.
-///
-/// Falls back to a JSON number when serialising back (we only deserialize for
-/// inbound tool args; outbound is just the underlying numeric type).
-/// </summary>
-[JsonConverter(typeof(Converter))]
-public readonly struct JsonNum
-{
-    /// <summary>Original string form (preserved so error messages echo what the LLM sent).</summary>
-    public string Raw { get; }
-    public JsonNum(string raw) { Raw = raw; }
-
-    public ulong AsUInt64(string field) => Numbers.ParseUInt64(Raw, field);
-    public long  AsInt64(string field)  => Numbers.ParseInt64(Raw, field);
-    public uint  AsUInt32(string field) => Numbers.ParseUInt32(Raw, field);
-    public int   AsInt32(string field)  => Numbers.ParseInt32(Raw, field);
-
-    public sealed class Converter : JsonConverter<JsonNum>
-    {
-        public override JsonNum Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-        {
-            switch (reader.TokenType)
-            {
-                case JsonTokenType.Number:
-                    // Preserve the literal so the parser path is uniform — and so
-                    // ulong values above long.MaxValue (which reader.GetInt64() rejects)
-                    // round-trip without a precision-losing intermediate.
-                    var bytes = reader.HasValueSequence
-                        ? BuffersExtensions.ToArray(reader.ValueSequence)
-                        : reader.ValueSpan.ToArray();
-                    return new JsonNum(System.Text.Encoding.UTF8.GetString(bytes));
-                case JsonTokenType.String:
-                    return new JsonNum(reader.GetString() ?? "");
-                default:
-                    throw new JsonException($"expected a number or a string for a numeric field, got {reader.TokenType}");
-            }
-        }
-
-        public override void Write(Utf8JsonWriter writer, JsonNum value, JsonSerializerOptions options)
-            => writer.WriteStringValue(value.Raw);
-    }
 }

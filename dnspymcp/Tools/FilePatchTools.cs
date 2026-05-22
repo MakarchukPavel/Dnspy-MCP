@@ -16,9 +16,9 @@ namespace DnSpyMcp.Tools;
 public static class FilePatchTools
 {
     [McpServerTool(Name = "reverse_patch_il_nop")]
-    [Description("[REVERSE] Replace a range of IL instructions with nops and save to outputPath. Params: typeFullName, methodName, startOffset (int — decimal or hex string e.g. '0x1a'), endOffset (inclusive, same form), outputPath, asmPath (optional), overloadIndex=0.")]
+    [Description("[REVERSE] Replace a range of IL instructions with nops and save to outputPath. Params: typeFullName, methodName, startOffset (int as string — decimal '26' or hex '0x1a'; 0o/0b also accepted), endOffset (inclusive, same form), outputPath, asmPath (optional), overloadIndex=0.")]
     public static object PatchIlNop(Workspace ws, string typeFullName, string methodName,
-                                    JsonNum startOffset, JsonNum endOffset, string outputPath, string? asmPath = null, int overloadIndex = 0)
+                                    string startOffset, string endOffset, string outputPath, string? asmPath = null, int overloadIndex = 0)
     {
         var a = ws.Get(asmPath);
         var t = a.Module.FindReflection(typeFullName) ?? throw new McpException($"type not found: {typeFullName}");
@@ -27,8 +27,8 @@ public static class FilePatchTools
         if (overloadIndex < 0 || overloadIndex >= overloads.Count) throw new McpException($"overloadIndex out of range (have {overloads.Count})");
         var m = overloads[overloadIndex];
         if (!m.HasBody) throw new McpException("method has no body");
-        int start = startOffset.AsInt32("startOffset");
-        int end = endOffset.AsInt32("endOffset");
+        int start = Numbers.ParseInt32(startOffset, "startOffset");
+        int end = Numbers.ParseInt32(endOffset, "endOffset");
         int changed = 0;
         foreach (var instr in m.Body.Instructions)
         {
@@ -44,10 +44,10 @@ public static class FilePatchTools
     }
 
     [McpServerTool(Name = "reverse_patch_bytes")]
-    [Description("[REVERSE] Overwrite raw file bytes at a given file offset. Params: filePath (any binary), offset (long — decimal or hex string e.g. '0x1234'), hex (bytes payload as hex). Returns {written}.")]
-    public static object PatchBytes(string filePath, JsonNum offset, string hex)
+    [Description("[REVERSE] Overwrite raw file bytes at a given file offset. Params: filePath (any binary), offset (long as string — decimal or hex e.g. '0x1234'), hex (bytes payload as hex). Returns {written}.")]
+    public static object PatchBytes(string filePath, string offset, string hex)
     {
-        long off = offset.AsInt64("offset");
+        long off = Numbers.ParseInt64(offset, "offset");
         hex = hex.Replace(" ", "").Replace("\n", "").Replace("\r", "");
         if ((hex.Length & 1) != 0) throw new McpException("hex must be even length");
         var data = new byte[hex.Length / 2];

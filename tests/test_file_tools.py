@@ -196,7 +196,7 @@ def test_reverse_il_method_by_token(mcp, asm):
     methods = mcp.call_json("reverse_list_methods",
                             {"asmPath": asm, "typeFullName": "DnSpyMcp.TestTarget.Program"})["items"]
     add = next(m for m in methods if m["name"] == "Add")
-    r = mcp.call_json("reverse_il_method_by_token", {"asmPath": asm, "token": add["token"]})
+    r = mcp.call_json("reverse_il_method_by_token", {"asmPath": asm, "token": str(add["token"])})
     assert any(i["opCode"] == "ret" for i in r["items"])
 
 
@@ -541,14 +541,14 @@ def test_reverse_annotations_roundtrip(mcp, asm, tmp_path_factory):
 
         # Rename + comment.
         r1 = mcp.call_json("reverse_rename_member",
-                           {"asmPath": asm_str, "token": token, "newName": "AddTwoInts"})
+                           {"asmPath": asm_str, "token": str(token), "newName": "AddTwoInts"})
         assert r1["ok"] is True
         assert r1["newName"] == "AddTwoInts"
         sidecar = r1["sidecarPath"]
         assert os.path.exists(sidecar), f"sidecar not written: {sidecar}"
 
         r2 = mcp.call_json("reverse_set_comment",
-                           {"asmPath": asm_str, "token": token, "text": "trivial integer add — used by Compute"})
+                           {"asmPath": asm_str, "token": str(token), "text": "trivial integer add — used by Compute"})
         assert r2["ok"] is True
 
         # List should show both rows.
@@ -565,7 +565,7 @@ def test_reverse_annotations_roundtrip(mcp, asm, tmp_path_factory):
 
         # Clear rename only — comment should survive.
         clr = mcp.call_json("reverse_clear_annotation",
-                            {"asmPath": asm_str, "token": token, "kind": "rename"})
+                            {"asmPath": asm_str, "token": str(token), "kind": "rename"})
         assert clr["removedRename"] is True
         assert clr["removedComment"] is False
         listing2 = mcp.call_json("reverse_list_annotations", {"asmPath": asm_str})
@@ -581,8 +581,8 @@ def test_reverse_patch_il_nop(mcp, asm, tmp_path_factory):
         "asmPath": asm,
         "typeFullName": "DnSpyMcp.TestTarget.Program",
         "methodName": "Add",
-        "startOffset": 0,
-        "endOffset": 2,
+        "startOffset": "0",
+        "endOffset": "2",
         "outputPath": str(out),
     })
     assert r["changedInstructions"] >= 1
@@ -596,7 +596,7 @@ def test_reverse_patch_bytes_roundtrip(mcp, asm, tmp_path_factory):
     shutil.copy2(asm, copy)
     # read first byte, overwrite with same value
     orig = copy.read_bytes()[:1].hex()
-    r = mcp.call_json("reverse_patch_bytes", {"filePath": str(copy), "offset": 0, "hex": orig})
+    r = mcp.call_json("reverse_patch_bytes", {"filePath": str(copy), "offset": "0", "hex": orig})
     assert r["written"] == 1
 
 

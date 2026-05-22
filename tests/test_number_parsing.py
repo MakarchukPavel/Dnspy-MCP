@@ -1,11 +1,12 @@
 """Tests for the flexible-number param handling.
 
-Every address / token / offset param accepts EITHER a JSON number (decimal,
-backward-compatible with old callers) OR a JSON string with optional base
-prefix: 0x/0X (hex), 0o/0O (octal), 0b/0B (binary), or no prefix (decimal).
+Every address / token / file-offset param is wire-form `string` (the JSON
+Schema for these fields is `{"type": "string"}` so the Anthropic API doesn't
+reject the tool catalog the way a JSON-Schema `true` would). String values
+accept optional base prefix: 0x/0X (hex), 0o/0O (octal), 0b/0B (binary), or
+no prefix (decimal).
 
-Underscores as digit separators are allowed in strings; whitespace is
-trimmed.
+Underscores as digit separators are allowed; whitespace is trimmed.
 """
 from __future__ import annotations
 
@@ -32,11 +33,13 @@ def _first_method_token(mcp, asm_path):
     return add["token"]
 
 
-def test_token_accepts_decimal_number(mcp, open_target):
-    """JSON number (legacy form) must still work."""
+def test_token_rejects_bare_json_number(mcp, open_target):
+    """Wire format is string; sending a bare JSON number must fail the MCP
+    SDK's parameter binding. This test exists to lock in the schema choice
+    so we don't accidentally re-introduce a `true` (any-of) schema."""
     tok = _first_method_token(mcp, open_target)
-    r = mcp.call_json("reverse_il_method_by_token", {"token": tok, "asmPath": open_target})
-    assert r["total"] >= 1, "decimal-number token should resolve a real method body"
+    r = mcp.call("reverse_il_method_by_token", {"token": tok, "asmPath": open_target})
+    assert not r["ok"], "bare JSON number should not bind to a string param"
 
 
 def test_token_accepts_decimal_string(mcp, open_target):

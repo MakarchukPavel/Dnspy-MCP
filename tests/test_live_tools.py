@@ -115,7 +115,7 @@ def test_heap_read_widget_object(live_agent):
     rows = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "Widget", "max": 1}))
     assert rows, "no Widget instance on heap"
     addr = rows[0]["address"] if isinstance(rows[0], dict) else rows[0]
-    obj = live_agent.call_json("debug_heap_read_object", {"address": int(addr), "maxFields": 16})
+    obj = live_agent.call_json("debug_heap_read_object", {"address": str(int(addr)), "maxFields": 16})
     assert obj is not None
 
 
@@ -124,7 +124,7 @@ def test_heap_read_string(live_agent):
     if not strs:
         pytest.skip("no strings on heap yet")
     addr = strs[0]["address"] if isinstance(strs[0], dict) else strs[0]
-    s = live_agent.call_json("debug_heap_read_string", {"address": int(addr)})
+    s = live_agent.call_json("debug_heap_read_string", {"address": str(int(addr))})
     assert s is not None
 
 
@@ -316,8 +316,8 @@ def test_memory_roundtrip(live_agent):
         assert stk, "empty stack while paused"
         addr = stk[0].get("stackStart")
         assert addr, "no stackStart in frame"
-        data = live_agent.call_json("debug_memory_read", {"address": int(addr), "size": 1})
-        live_agent.call_json("debug_memory_write", {"address": int(addr), "hex": data["hex"]})
+        data = live_agent.call_json("debug_memory_read", {"address": str(int(addr)), "size": 1})
+        live_agent.call_json("debug_memory_write", {"address": str(int(addr)), "hex": data["hex"]})
     finally:
         live_agent.call_json("debug_go")
 
