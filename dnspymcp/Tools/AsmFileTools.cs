@@ -497,12 +497,13 @@ public static class AsmFileTools
     }
 
     [McpServerTool(Name = "reverse_il_method_by_token")]
-    [Description("[REVERSE] Return IL for a method identified by its metadata token (paginated). Params: token, asmPath (optional), offset=0, max=500.")]
-    public static object IlByToken(Workspace ws, uint token, string? asmPath = null, int offset = 0, int max = 200)
+    [Description("[REVERSE] Return IL for a method identified by its metadata token (paginated). Params: token (uint — decimal or hex string e.g. '0x06000123'), asmPath (optional), offset=0, max=500.")]
+    public static object IlByToken(Workspace ws, JsonNum token, string? asmPath = null, int offset = 0, int max = 200)
     {
         var a = ws.Get(asmPath);
-        var md = a.Module.ResolveToken(token) as MethodDef
-            ?? throw new McpException($"method not found for token 0x{token:X8}");
+        var tok = token.AsUInt32("token");
+        var md = a.Module.ResolveToken(tok) as MethodDef
+            ?? throw new McpException($"method not found for token 0x{tok:X8}");
         if (!md.HasBody) return new { total = 0, offset, returned = 0, truncated = false, items = Array.Empty<object>() };
         var rows = md.Body.Instructions.Select(i => new { offset = i.Offset, opCode = i.OpCode.Name, operand = i.Operand?.ToString() });
         return Paging.Page(rows, offset, max);
@@ -867,31 +868,33 @@ public static class AsmFileTools
     // them as a curator's notebook bound to a particular DLL.
 
     [McpServerTool(Name = "reverse_rename_member")]
-    [Description("[REVERSE] Record a user-facing rename for a metadata token (type / method / field / property / event). Persists to a sidecar JSON next to the assembly. Useful for tracking 'this method does X' notes across long sessions. Resolves the original name for the response. Params: token:uint, newName:string, asmPath (optional).")]
-    public static object RenameMember(Workspace ws, uint token, string newName, string? asmPath = null)
+    [Description("[REVERSE] Record a user-facing rename for a metadata token (type / method / field / property / event). Persists to a sidecar JSON next to the assembly. Useful for tracking 'this method does X' notes across long sessions. Resolves the original name for the response. Params: token (uint — decimal or hex string e.g. '0x06000123'), newName:string, asmPath (optional).")]
+    public static object RenameMember(Workspace ws, JsonNum token, string newName, string? asmPath = null)
     {
         if (string.IsNullOrWhiteSpace(newName)) throw new McpException("newName must be non-empty");
         var a = ws.Get(asmPath);
-        var resolved = a.Module.ResolveToken(token) as IMemberDef
-            ?? a.Module.ResolveToken(token) as TypeDef
-            ?? throw new McpException($"no resolvable member for token 0x{token:X8}");
+        var tok = token.AsUInt32("token");
+        var resolved = a.Module.ResolveToken(tok) as IMemberDef
+            ?? a.Module.ResolveToken(tok) as TypeDef
+            ?? throw new McpException($"no resolvable member for token 0x{tok:X8}");
         var oldName = (resolved as IFullName)?.FullName ?? resolved.ToString();
-        a.Annotations.SetRename(token, newName);
-        return new { ok = true, token, oldName, newName, sidecarPath = a.Annotations.SidecarPath };
+        a.Annotations.SetRename(tok, newName);
+        return new { ok = true, token = tok, oldName, newName, sidecarPath = a.Annotations.SidecarPath };
     }
 
     [McpServerTool(Name = "reverse_set_comment")]
-    [Description("[REVERSE] Attach a free-form text comment to a metadata token. Persists to the sidecar JSON. Use for 'why does this dispatch on X' notes during reverse-engineering. Pass empty string to clear. Params: token:uint, text:string, asmPath (optional).")]
-    public static object SetComment(Workspace ws, uint token, string text, string? asmPath = null)
+    [Description("[REVERSE] Attach a free-form text comment to a metadata token. Persists to the sidecar JSON. Use for 'why does this dispatch on X' notes during reverse-engineering. Pass empty string to clear. Params: token (uint — decimal or hex string), text:string, asmPath (optional).")]
+    public static object SetComment(Workspace ws, JsonNum token, string text, string? asmPath = null)
     {
         var a = ws.Get(asmPath);
+        var tok = token.AsUInt32("token");
         if (string.IsNullOrEmpty(text))
         {
-            var removed = a.Annotations.ClearComment(token);
-            return new { ok = true, token, cleared = removed, sidecarPath = a.Annotations.SidecarPath };
+            var removed = a.Annotations.ClearComment(tok);
+            return new { ok = true, token = tok, cleared = removed, sidecarPath = a.Annotations.SidecarPath };
         }
-        a.Annotations.SetComment(token, text);
-        return new { ok = true, token, length = text.Length, sidecarPath = a.Annotations.SidecarPath };
+        a.Annotations.SetComment(tok, text);
+        return new { ok = true, token = tok, length = text.Length, sidecarPath = a.Annotations.SidecarPath };
     }
 
     [McpServerTool(Name = "reverse_list_annotations")]
@@ -926,14 +929,15 @@ public static class AsmFileTools
     }
 
     [McpServerTool(Name = "reverse_clear_annotation")]
-    [Description("[REVERSE] Remove a single annotation (rename or comment) by token. Pass kind='rename'/'comment'/'all' to choose what to clear. Params: token:uint, kind='all', asmPath (optional).")]
-    public static object ClearAnnotation(Workspace ws, uint token, string kind = "all", string? asmPath = null)
+    [Description("[REVERSE] Remove a single annotation (rename or comment) by token. Pass kind='rename'/'comment'/'all' to choose what to clear. Params: token (uint — decimal or hex string), kind='all', asmPath (optional).")]
+    public static object ClearAnnotation(Workspace ws, JsonNum token, string kind = "all", string? asmPath = null)
     {
         var a = ws.Get(asmPath);
+        var tok = token.AsUInt32("token");
         bool removedRename = false, removedComment = false;
-        if (kind == "rename" || kind == "all") removedRename = a.Annotations.ClearRename(token);
-        if (kind == "comment" || kind == "all") removedComment = a.Annotations.ClearComment(token);
-        return new { ok = true, token, removedRename, removedComment };
+        if (kind == "rename" || kind == "all") removedRename = a.Annotations.ClearRename(tok);
+        if (kind == "comment" || kind == "all") removedComment = a.Annotations.ClearComment(tok);
+        return new { ok = true, token = tok, removedRename, removedComment };
     }
 
     private sealed class MemberRefComparer : IEqualityComparer<IMemberRef>

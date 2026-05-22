@@ -22,13 +22,10 @@ public static class LiveDebugTools
     // to disconnect+reconnect between tool calls; just `switch`.
 
     [McpServerTool(Name = "debug_session_connect")]
-    [Description("[DEBUG] Connect (or re-connect) a named TCP session to a dnspymcpagent at host:port and make it active. Idempotent — calling with an existing name reconfigures and reconnects that slot. Does NOT attach the debugger to any target; call `debug_pid_attach` for that. Params: host (required), port (required), token=null, name='default'.")]
+    [Description("[DEBUG] Connect (or re-connect) a named TCP session to a dnspymcpagent at host:port and make it active. Idempotent — calling with an existing name reconfigures and reconnects that slot. Does NOT attach the debugger to any target; call `debug_pid_attach` for that. The MCP server enforces per-tenant exclusivity on (host, port): a different MCP tenant (different Authorization Bearer) cannot hold the same dnspymcpagent at the same time. Params: host (required), port (required), token=null (agent-side auth), name='default'.")]
     public static object AgentConnect(AgentRegistry reg, string host, int port, string? token = null, string name = "default")
     {
-        var agent = reg.GetOrCreate(name);
-        agent.Configure(host, port, token);
-        agent.Connect();
-        reg.SetActive(name);
+        reg.OpenSlot(name, host, port, token);
         return new { connected = true, name, host, port, active = name };
     }
 
@@ -206,9 +203,13 @@ public static class LiveDebugTools
     // ---- breakpoints ----------------------------------------------------
 
     [McpServerTool(Name = "debug_bp_set_il")]
-    [Description("[DEBUG] Set an IL-offset breakpoint. Params: modulePath (suffix ok), token:uint, offset:uint=0, condition (optional, format `count <op> N` where op is ==/!=/>=/<=/>/<; e.g. 'count >= 5' to skip the first 4 hits).")]
-    public static object BpSetIl(AgentRegistry reg, string modulePath, uint token, uint offset = 0, string? condition = null, string? agent = null)
-        => reg.Get(agent).Result("bp.set_il", new { modulePath, token, offset, condition })!;
+    [Description("[DEBUG] Set an IL-offset breakpoint. Params: modulePath (suffix ok), token (uint — decimal or hex string e.g. '0x06000123'), offset (uint, default 0; decimal or 0x/0o/0b string), condition (optional, format `count <op> N` where op is ==/!=/>=/<=/>/<; e.g. 'count >= 5' to skip the first 4 hits).")]
+    public static object BpSetIl(AgentRegistry reg, string modulePath, JsonNum token, JsonNum? offset = null, string? condition = null, string? agent = null)
+    {
+        var tok = token.AsUInt32("token");
+        var off = offset?.AsUInt32("offset") ?? 0u;
+        return reg.Get(agent).Result("bp.set_il", new { modulePath, token = tok, offset = off, condition })!;
+    }
 
     [McpServerTool(Name = "debug_bp_set_by_name")]
     [Description("[DEBUG] Set a breakpoint at IL=0 of a named method. Params: modulePath, typeFullName, methodName, overloadIndex=0, condition (optional, format `count <op> N`).")]
@@ -263,14 +264,14 @@ public static class LiveDebugTools
     }
 
     [McpServerTool(Name = "debug_heap_read_object")]
-    [Description("[DEBUG] Dump fields of a managed object. Params: address:ulong, maxFields=64.")]
-    public static object HeapReadObject(AgentRegistry reg, ulong address, int maxFields = 64, string? agent = null)
-        => reg.Get(agent).Result("heap.read_object", new { address, maxFields })!;
+    [Description("[DEBUG] Dump fields of a managed object. Params: address (ulong — decimal or hex string e.g. '0x7ff800001234'), maxFields=64.")]
+    public static object HeapReadObject(AgentRegistry reg, JsonNum address, int maxFields = 64, string? agent = null)
+        => reg.Get(agent).Result("heap.read_object", new { address = address.AsUInt64("address"), maxFields })!;
 
     [McpServerTool(Name = "debug_heap_read_string")]
-    [Description("[DEBUG] Read a System.String at a managed address.")]
-    public static object HeapReadString(AgentRegistry reg, ulong address, string? agent = null)
-        => reg.Get(agent).Result("heap.read_string", new { address })!;
+    [Description("[DEBUG] Read a System.String at a managed address. Params: address (ulong — decimal or hex string e.g. '0x7ff800001234').")]
+    public static object HeapReadString(AgentRegistry reg, JsonNum address, string? agent = null)
+        => reg.Get(agent).Result("heap.read_string", new { address = address.AsUInt64("address") })!;
 
     [McpServerTool(Name = "debug_heap_stats")]
     [Description("[DEBUG] Top-N types on the managed heap by total size (paginated). Params: top=25 (agent-side), offset=0, max=200 (MCP envelope cap).")]
@@ -278,22 +279,22 @@ public static class LiveDebugTools
         => Paging.PageJsonArray(reg.Get(agent).Result("heap.stats", new { top }), offset, max);
 
     [McpServerTool(Name = "debug_memory_read")]
-    [Description("[DEBUG] Read raw bytes (returned as hex) at a virtual address. Params: address:ulong, size:int (1..1MB).")]
-    public static object MemoryRead(AgentRegistry reg, ulong address, int size, string? agent = null)
-        => reg.Get(agent).Result("memory.read", new { address, size })!;
+    [Description("[DEBUG] Read raw bytes (returned as hex) at a virtual address. Params: address (ulong — decimal or hex string e.g. '0x7ff800001234'), size:int (1..1MB).")]
+    public static object MemoryRead(AgentRegistry reg, JsonNum address, int size, string? agent = null)
+        => reg.Get(agent).Result("memory.read", new { address = address.AsUInt64("address"), size })!;
 
     [McpServerTool(Name = "debug_memory_write")]
-    [Description("[DEBUG] Write raw bytes (hex string) at a virtual address — live edit against the running process, not a file patch. Use reverse_patch_bytes for on-disk edits.")]
-    public static object MemoryWrite(AgentRegistry reg, ulong address, string hex, string? agent = null)
-        => reg.Get(agent).Result("memory.write", new { address, hex })!;
+    [Description("[DEBUG] Write raw bytes (hex string) at a virtual address — live edit against the running process, not a file patch. Use reverse_patch_bytes for on-disk edits. Params: address (ulong — decimal or hex string), hex (bytes payload as hex).")]
+    public static object MemoryWrite(AgentRegistry reg, JsonNum address, string hex, string? agent = null)
+        => reg.Get(agent).Result("memory.write", new { address = address.AsUInt64("address"), hex })!;
 
     [McpServerTool(Name = "debug_memory_read_int")]
-    [Description("[DEBUG] Read a typed integer from memory. kind in {i8,u8,i16,u16,i32,u32,i64,u64}, default 'i32'.")]
-    public static object MemoryReadInt(AgentRegistry reg, ulong address, string kind = "i32", string? agent = null)
-        => reg.Get(agent).Result("memory.read_int", new { address, kind })!;
+    [Description("[DEBUG] Read a typed integer from memory. kind in {i8,u8,i16,u16,i32,u32,i64,u64}, default 'i32'. Params: address (ulong — decimal or hex string), kind='i32'.")]
+    public static object MemoryReadInt(AgentRegistry reg, JsonNum address, string kind = "i32", string? agent = null)
+        => reg.Get(agent).Result("memory.read_int", new { address = address.AsUInt64("address"), kind })!;
 
     [McpServerTool(Name = "debug_disasm")]
-    [Description("[DEBUG] Disassemble x64 bytes at a virtual address via Iced. Params: address:ulong, size=128.")]
-    public static object Disasm(AgentRegistry reg, ulong address, int size = 128, string? agent = null)
-        => reg.Get(agent).Result("memory.disasm", new { address, size })!;
+    [Description("[DEBUG] Disassemble x64 bytes at a virtual address via Iced. Params: address (ulong — decimal or hex string), size=128.")]
+    public static object Disasm(AgentRegistry reg, JsonNum address, int size = 128, string? agent = null)
+        => reg.Get(agent).Result("memory.disasm", new { address = address.AsUInt64("address"), size })!;
 }
