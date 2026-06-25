@@ -77,6 +77,80 @@ public static class HeapHandlers
                 };
             });
 
+        d.Register("heap.read_array",
+            "[DEBUG] Read elements of a managed single-dimension array (e.g. a List<T> backing _items, or a T[] field). Primitives are decoded; reference elements return {address,type}; string elements return text; null elements return null. Paged. Params: {address:ulong, offset?:int=0, count?:int=128}.",
+            p =>
+            {
+                var address = Dispatcher.Req<ulong>(p, "address");
+                var offset = Dispatcher.Opt<int>(p, "offset", 0);
+                var count = Dispatcher.Opt<int>(p, "count", 128);
+                if (offset < 0) offset = 0;
+                if (count < 0) count = 0;
+                var heap = Program.Session.ClrRuntime.Heap;
+                var obj = heap.GetObject(address);
+                if (obj.Type == null) throw new ArgumentException($"no type at 0x{address:X}");
+                if (!obj.Type.IsArray) throw new ArgumentException($"object at 0x{address:X} is not an array (type {obj.Type.Name})");
+                var arr = obj.AsArray();
+                int length = arr.Length;
+                var comp = obj.Type.ComponentType;
+                var et = comp?.ElementType ?? ClrElementType.Unknown;
+                bool isRef = et == ClrElementType.Class || et == ClrElementType.Object
+                          || et == ClrElementType.Array || et == ClrElementType.SZArray;
+                int end = count == 0 ? length : Math.Min(length, offset + count);
+                var items = new List<object>();
+                for (int i = offset; i < end; i++)
+                {
+                    object? val;
+                    try
+                    {
+                        if (et == ClrElementType.String)
+                        {
+                            var e = arr.GetObjectValue(i);
+                            val = e.IsNull ? null : e.AsString(int.MaxValue);
+                        }
+                        else if (isRef)
+                        {
+                            var e = arr.GetObjectValue(i);
+                            val = e.IsNull ? (object?)null : new { kind = "object", type = e.Type?.Name, address = $"0x{e.Address:X}" };
+                        }
+                        else
+                        {
+                            switch (et)
+                            {
+                                case ClrElementType.Boolean: val = arr.GetValue<bool>(i); break;
+                                case ClrElementType.Int8:     val = arr.GetValue<sbyte>(i); break;
+                                case ClrElementType.UInt8:    val = arr.GetValue<byte>(i); break;
+                                case ClrElementType.Int16:    val = arr.GetValue<short>(i); break;
+                                case ClrElementType.UInt16:   val = arr.GetValue<ushort>(i); break;
+                                case ClrElementType.Char:     val = (int)arr.GetValue<char>(i); break;
+                                case ClrElementType.Int32:    val = arr.GetValue<int>(i); break;
+                                case ClrElementType.UInt32:   val = arr.GetValue<uint>(i); break;
+                                case ClrElementType.Int64:    val = arr.GetValue<long>(i); break;
+                                case ClrElementType.UInt64:   val = arr.GetValue<ulong>(i); break;
+                                case ClrElementType.Float:    val = arr.GetValue<float>(i); break;
+                                case ClrElementType.Double:   val = arr.GetValue<double>(i); break;
+                                case ClrElementType.NativeInt: val = arr.GetValue<long>(i); break;
+                                case ClrElementType.Pointer:   val = arr.GetValue<long>(i); break;
+                                default: val = $"<{et}>"; break; // struct/value-type elements: inspect via element fields
+                            }
+                        }
+                    }
+                    catch (Exception ex) { val = $"<read error: {ex.Message}>"; }
+                    items.Add(new { index = i, value = val });
+                }
+                return new
+                {
+                    address = (long)address,
+                    type = obj.Type.Name,
+                    elementType = et.ToString(),
+                    length,
+                    offset,
+                    returned = items.Count,
+                    truncated = end < length,
+                    items,
+                };
+            });
+
         d.Register("heap.read_string",
             "[DEBUG] Read a System.String at the given managed address. Params: {address:ulong}.",
             p =>

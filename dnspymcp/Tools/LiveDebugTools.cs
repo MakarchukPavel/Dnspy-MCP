@@ -273,6 +273,11 @@ public static class LiveDebugTools
     public static object HeapReadString(AgentRegistry reg, string address, string? agent = null)
         => reg.Get(agent).Result("heap.read_string", new { address = Numbers.ParseUInt64(address, "address") })!;
 
+    [McpServerTool(Name = "debug_heap_read_array")]
+    [Description("[DEBUG] Read elements of a managed single-dimension array (e.g. a List<T> backing _items, or a T[] field). Primitives decoded; reference elements as {address,type}; string elements as text; null elements as null. Paged. Params: address (ulong as string — decimal or hex), offset=0, count=128.")]
+    public static object HeapReadArray(AgentRegistry reg, string address, int offset = 0, int count = 128, string? agent = null)
+        => reg.Get(agent).Result("heap.read_array", new { address = Numbers.ParseUInt64(address, "address"), offset, count })!;
+
     [McpServerTool(Name = "debug_heap_stats")]
     [Description("[DEBUG] Top-N types on the managed heap by total size (paginated). Params: top=25 (agent-side), offset=0, max=200 (MCP envelope cap).")]
     public static object HeapStats(AgentRegistry reg, int top = 25, int offset = 0, int max = 200, string? agent = null)

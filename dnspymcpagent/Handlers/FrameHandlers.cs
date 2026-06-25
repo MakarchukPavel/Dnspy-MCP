@@ -41,15 +41,30 @@ public static class FrameHandlers
             throw new ArgumentException($"frameIndex {frameIndex} not found on the paused thread");
 
         var rows = new List<object>();
+        int lastReadable = -1;
         for (uint i = 0; i < MaxProbeSlots; i++)
         {
             CorValue? v = locals
                 ? frame.GetILLocal(i, out _)
                 : frame.GetILArgument(i, out _);
-            // ICorDebug returns null past the last valid slot — that's our
-            // termination signal since neither EnumerateLocals nor a count
-            // is exposed by CorFrame.
-            if (v is null) break;
+            if (v is null)
+            {
+                // A null slot is EITHER optimized away (the JIT dropped the value
+                // on an optimized/release build) OR past the last real slot —
+                // ICorDebug can't tell us which. Record a placeholder and KEEP
+                // probing instead of breaking, so an optimized-away slot 0 (e.g.
+                // 'this' on an instance method, or an inlined extension-method
+                // receiver) no longer truncates every argument/local after it.
+                // Trailing placeholders are trimmed below.
+                rows.Add(new
+                {
+                    index = (int)i,
+                    kind = locals ? "local" : "arg",
+                    elementType = (string?)null,
+                    value = (object)new { kind = "unavailable", reason = "optimized away or not in scope" },
+                });
+                continue;
+            }
             rows.Add(new
             {
                 index = (int)i,
@@ -57,12 +72,20 @@ public static class FrameHandlers
                 elementType = v.ElementType.ToString(),
                 value = ReadValue(v),
             });
+            lastReadable = rows.Count - 1;
         }
+        // Drop trailing placeholders: they are past the last readable slot (end of
+        // list). A gap BEFORE the last readable slot is kept and labeled
+        // 'unavailable'. NOTE: if the very last real slot was optimized away it
+        // gets trimmed too — unavoidable without method metadata.
+        if (lastReadable + 1 < rows.Count)
+            rows.RemoveRange(lastReadable + 1, rows.Count - (lastReadable + 1));
         return new
         {
             frameIndex,
             kind = locals ? "locals" : "arguments",
             count = rows.Count,
+            readableCount = lastReadable + 1,
             items = rows,
         };
     }
