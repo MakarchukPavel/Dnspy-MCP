@@ -426,6 +426,42 @@ def test_eval_expression_object_graph(live_agent, mcp):
         live_agent.call_json("debug_go")
 
 
+def test_eval_call_func_eval(live_agent, mcp):
+    """debug_eval_call runs real func-eval on the paused receiver: a ToString
+    override, a computed property getter, a 0-arg method, and an exception path.
+    Skips when the running MCP host predates the tool (dist not rebuilt) — the
+    agent side is covered by the standalone probe regardless."""
+    if not any(t.get("name") == "debug_eval_call" for t in mcp.list_tools()):
+        pytest.skip("debug_eval_call not in this MCP host build (rebuild dist via builder.ps1)")
+
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect"})
+    bp_id = bp["id"]
+    try:
+        r = live_agent.call_json("debug_wait_paused", {"timeoutMs": 6000})
+        assert r["state"] == "Paused", r
+
+        ts = live_agent.call_json("debug_eval_call", {"expr": "arg0.ToString()"})["value"]
+        assert ts.get("kind") == "string" and ts["value"].startswith("Widget("), ts
+
+        label = live_agent.call_json("debug_eval_call", {"expr": "arg0.Label"})["value"]
+        assert label.get("kind") == "string" and "#" in label["value"], label
+
+        doubled = live_agent.call_json("debug_eval_call", {"expr": "arg0.Doubled()"})["value"]
+        assert doubled.get("kind") == "primitive" and isinstance(doubled.get("value"), int), doubled
+
+        boom = live_agent.call_json("debug_eval_call", {"expr": "arg0.Boom()"})["value"]
+        assert boom.get("kind") == "exception" and "InvalidOperation" in (boom.get("type") or ""), boom
+
+        # unknown member -> structured tool error
+        assert not live_agent.call("debug_eval_call", {"expr": "arg0.Nope()"})["ok"]
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
 def test_conditional_bp_invalid_syntax(live_agent):
     r = live_agent.call("debug_bp_set_by_name", {
         "modulePath": "dnspymcptest",

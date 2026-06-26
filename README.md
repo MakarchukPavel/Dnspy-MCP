@@ -141,6 +141,7 @@ debug_step_in / debug_step_over / debug_step_out
 debug_thread_list / debug_thread_stack / debug_thread_current
 debug_frame_locals / debug_frame_arguments
 debug_eval                                       # passive object-graph path read (no func-eval)
+debug_eval_call                                  # func-eval: invoke a 0-arg getter/method (runs code)
 debug_list_modules / debug_find_type / debug_list_type_methods
 
 # breakpoints (optional conditions: `count <op> N` or value gate `arg/local[.field] <op> literal`)
@@ -329,13 +330,35 @@ fields (primitives, strings, Guid/DateTime/enum/struct); an object leaf comes
 back as `{kind:object,type,address}` so you can drill in with
 `debug_heap_read_object`.
 
-This is **not** func-eval: calling methods or computed properties
-(`.ToString()`, `GetValue(...)`) is rejected on purpose. Driving
-`ICorDebugEval` on a live IIS/w3wp worker can deadlock or corrupt it if another
-thread holds a lock at the eval point, so the read-only object-graph walk is
-the safe subset — which already covers most "what's actually in this object"
-questions. Missing fields and null hops come back as structured
-`{kind:"error"|"null"}` rather than throwing.
+`debug_eval` is **passive** — it never runs target code. For computed
+properties and methods that must execute, use `debug_eval_call` (below).
+Missing fields and null hops come back as structured `{kind:"error"|"null"}`
+rather than throwing.
+
+### Func-eval (`debug_eval_call`)
+
+When a value only exists by *running* code — a computed property, `ToString()`,
+a helper method — `debug_eval_call` invokes it via `ICorDebugEval`:
+
+```
+debug_eval_call(expr="arg0.ToString()")    # method (parens force a 0-arg method call)
+debug_eval_call(expr="this.DisplayName")   # bare member: tries get_DisplayName, then DisplayName()
+debug_eval_call(expr="local0.Doubled()")   # 0-arg instance method
+```
+
+The receiver is a root slot (`arg<i>` / `local<i>` / `this`); the member
+resolves across the type hierarchy (including inherited / cross-module members
+like `Object.ToString`). The eval runs on the paused thread with **all other
+threads suspended** and a timeout (default 2000 ms) + abort. The result is
+decoded like `debug_eval`; a thrown exception returns
+`{kind:"exception", type, message}`; a timeout returns `{kind:"timeout"}`.
+
+⚠ This **runs code in the target**. If the called method blocks on a lock
+another (suspended) thread holds, it stalls until the timeout fires, then
+aborts. Prefer passive `debug_eval` whenever a field or auto-property answers
+the question. v1 does not support arguments, generic methods, value-type
+(struct) receivers, or multi-hop receivers (`a.b.Method()`) — call on a root
+slot's object.
 
 ---
 

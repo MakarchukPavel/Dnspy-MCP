@@ -188,6 +188,11 @@ public static class LiveDebugTools
     public static object Eval(AgentRegistry reg, string expr, int frameIndex = 0, string? agent = null)
         => reg.Get(agent).Result("eval.expression", new { expr, frameIndex })!;
 
+    [McpServerTool(Name = "debug_eval_call")]
+    [Description("[DEBUG] Invoke a ZERO-ARGUMENT instance method or property getter on the paused frame's receiver and return the result — real func-eval via ICorDebug (RUNS target code, unlike debug_eval). expr = \"<root>.<member>\" or \"<root>.<member>()\", root = arg<i>/local<i>/'this'. A bare <member> is tried as a property getter (get_<member>) then a 0-arg method; <member>() forces a method. Resolves across base types. Runs on the paused thread with other threads SUSPENDED, with a timeout (default 2000ms) + abort. WARNING: if the called code blocks on a lock another thread holds, it can stall the target until the timeout — prefer debug_eval (passive) when you only need a field/auto-property. Result decoded like debug_eval; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. NOT supported: arguments, generic methods, value-type receivers, multi-hop paths. Params: expr (required), frameIndex=0, timeoutMs=2000.")]
+    public static object EvalCall(AgentRegistry reg, string expr, int frameIndex = 0, int timeoutMs = 2000, string? agent = null)
+        => reg.Get(agent).Result("eval.call", new { expr, frameIndex, timeoutMs })!;
+
     // ---- modules --------------------------------------------------------
 
     [McpServerTool(Name = "debug_list_modules")]

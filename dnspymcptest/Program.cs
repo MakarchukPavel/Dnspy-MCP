@@ -170,4 +170,10 @@ public sealed class Widget
     }
 
     public override string ToString() => $"Widget({Name}, {Value})";
+
+    // Func-eval (eval.call) targets: a computed property (NOT an auto-property,
+    // so it must RUN to produce a value), a zero-arg method, and a thrower.
+    public string Label => $"{Name}#{Value}";
+    public int Doubled() => Value * 2;
+    public string Boom() => throw new InvalidOperationException("boom from Widget");
 }

@@ -32,8 +32,12 @@ public static class EvalHandlers
     public static void Register(Dispatcher d)
     {
         d.Register("eval.expression",
-            "[DEBUG] Read a value expression against the currently-paused frame WITHOUT running any code (passive object-graph read — no func-eval / method calls). expr starts with a root — arg<i>, local<i>, or 'this' (= arg0 on instance methods) — then a dotted field/auto-property path. Examples: \"arg0\", \"this.Entity\", \"arg1.Owner.Name\", \"local0.UId\". Property names resolve their backing field; Guid/DateTime/enum/struct leaves are decoded; an object leaf returns {kind:object,type,address} to drill into with debug_heap_read_object. Params: {expr:string, frameIndex?:int=0}. Method/property invocation (.ToString(), GetX()) is unsupported by design — ICorDebug func-eval can deadlock a live worker.",
+            "[DEBUG] Read a value expression against the currently-paused frame WITHOUT running any code (passive object-graph read — no func-eval / method calls). expr starts with a root — arg<i>, local<i>, or 'this' (= arg0 on instance methods) — then a dotted field/auto-property path. Examples: \"arg0\", \"this.Entity\", \"arg1.Owner.Name\", \"local0.UId\". Property names resolve their backing field; Guid/DateTime/enum/struct leaves are decoded; an object leaf returns {kind:object,type,address} to drill into with debug_heap_read_object. Params: {expr:string, frameIndex?:int=0}. For computed properties / methods that must RUN code, use eval.call.",
             p => Program.Session.OnDbg<object>(() => Evaluate(p)));
+
+        d.Register("eval.call",
+            "[DEBUG] Invoke a ZERO-ARGUMENT instance method or property getter on the paused frame's receiver and return the result — real func-eval via ICorDebug (RUNS target code). expr = \"<root>.<member>\" or \"<root>.<member>()\", root = arg<i>/local<i>/'this'. A bare <member> is tried as a property getter (get_<member>) then a 0-arg method; <member>() forces a method. Resolves across the type hierarchy (incl. base types). Runs on the paused thread with all other threads SUSPENDED and a timeout (default 2000ms) + abort. ⚠ If the called code blocks on a lock another thread holds it can stall the target until the timeout fires. Result decoded like eval.expression; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. Params: {expr:string, frameIndex?:int=0, timeoutMs?:int=2000}. NOT supported in v1: arguments, generic methods, value-type (struct) receivers, multi-hop paths.",
+            p => Program.Session.OnDbg<object>(() => CallExpr(p)));
     }
 
     private static object Evaluate(JObject? p)
@@ -64,6 +68,114 @@ public static class EvalHandlers
 
         object? value = path.Length == 0 ? FrameHandlers.ReadValue(rootVal) : WalkPath(rootVal, path);
         return new { expr, frameIndex, value };
+    }
+
+    // ---- eval.call (func-eval) ----------------------------------------------
+
+    private static object CallExpr(JObject? p)
+    {
+        var expr = (Dispatcher.Req<string>(p, "expr") ?? string.Empty).Trim();
+        var frameIndex = Dispatcher.Opt<int>(p, "frameIndex", 0);
+        var timeoutMs = Dispatcher.Opt<int>(p, "timeoutMs", 2000);
+        if (expr.Length == 0) throw new ArgumentException("expr is required");
+
+        var parts = expr.Split('.');
+        if (parts.Length != 2)
+            throw new ArgumentException("eval.call v1 supports '<root>.<member>' only (root = arg<i>/local<i>/this) — e.g. \"arg0.ToString()\" or \"this.SomeProperty\"");
+        var root = parts[0].Trim();
+        var member = parts[1].Trim();
+        bool forceMethod = member.EndsWith("()", StringComparison.Ordinal);
+        if (forceMethod) member = member.Substring(0, member.Length - 2).Trim();
+        if (member.Length == 0) throw new ArgumentException("missing member name after '.'");
+
+        var dbg = Program.Session.DnDebugger;
+        if (dbg.ProcessState != DebuggerProcessState.Paused)
+            throw new InvalidOperationException($"cannot eval.call: state={dbg.ProcessState} (must be Paused)");
+        var thread = dbg.Current?.Thread
+            ?? throw new InvalidOperationException("no current thread on the active pause");
+        var frame = FrameHandlers.WalkToFrame(thread, frameIndex)
+            ?? throw new ArgumentException($"frameIndex {frameIndex} not found on the paused thread");
+
+        var rootVal = ResolveRoot(frame, root)
+            ?? throw new ArgumentException($"root '{root}' is unavailable (optimized away or not in scope)");
+        if (!rootVal.IsReference)
+            throw new ArgumentException("eval.call v1 requires a reference-type receiver (value-type/struct receivers not supported)");
+        var deref = rootVal.DereferencedValue;
+        if (deref == null || deref.IsNull) return new { expr, value = new { kind = "null" } };
+        var exactType = deref.ExactType
+            ?? throw new InvalidOperationException("could not resolve the receiver's runtime type");
+
+        var candidates = forceMethod ? new[] { member } : new[] { "get_" + member, member };
+        var resolved = ResolveMethod(exactType, candidates)
+            ?? throw new ArgumentException(
+                $"member '{member}' not found as a {(forceMethod ? "0-arg method" : "property getter or 0-arg method")} on {DebuggerSession.TryGetCorValueTypeName(deref) ?? "<receiver>"} or its base types");
+
+        var (func, declType) = resolved;
+        var typeArgs = declType.TypeParameters.ToArray();
+        var args = new[] { rootVal };
+
+        using var dnEval = dbg.CreateEval(System.Threading.CancellationToken.None, suspendOtherThreads: true);
+        dnEval.SetThread(thread);
+        dnEval.SetTimeout(TimeSpan.FromMilliseconds(Math.Max(200, timeoutMs)));
+
+        EvalResult? res;
+        int hr;
+        try
+        {
+            res = dnEval.Call(func, typeArgs, args, out hr);
+        }
+        catch (TimeoutException)
+        {
+            return new { expr, frameIndex, value = new { kind = "timeout", reason = $"func-eval exceeded {timeoutMs}ms and was aborted" } };
+        }
+        if (res == null)
+            throw new InvalidOperationException($"func-eval setup failed (hr=0x{hr:X8})");
+
+        var r = res.Value;
+        if (r.WasCancelled)
+            return new { expr, frameIndex, value = new { kind = "timeout", reason = "func-eval cancelled/timed out" } };
+        if (r.WasException)
+            return new { expr, frameIndex, value = new { kind = "exception", type = DebuggerSession.TryGetCorValueTypeName(r.ResultOrException), message = TryExceptionMessage(r.ResultOrException) } };
+
+        return new { expr, frameIndex, value = r.ResultOrException == null ? (object)new { kind = "void" } : (FrameHandlers.ReadValue(r.ResultOrException) ?? new { kind = "void" }) };
+    }
+
+    /// <summary>
+    /// Walk the type hierarchy from <paramref name="startType"/> up its base
+    /// chain, returning the first (CorFunction, declaring CorType) where any of
+    /// <paramref name="candidates"/> resolves to a method token. Base CorTypes
+    /// carry their own metadata/module, so this finds inherited members
+    /// (incl. cross-module ones like Object.ToString).
+    /// </summary>
+    private static (CorFunction func, CorType declType)? ResolveMethod(CorType startType, string[] candidates)
+    {
+        for (var t = startType; t != null; t = t.Base)
+        {
+            if (!t.HasClass) continue;
+            var mdi = t.GetMetaDataImport(out uint typeToken);
+            if (mdi == null || typeToken == 0) continue;
+            foreach (var name in candidates)
+            {
+                uint mtok = MetaDataUtils.FindMethodByName(mdi, typeToken, name, 0);
+                if (mtok == 0) continue;
+                var func = t.Class?.Module?.GetFunctionFromToken(mtok);
+                if (func != null) return (func, t);
+            }
+        }
+        return null;
+    }
+
+    private static string? TryExceptionMessage(CorValue? exVal)
+    {
+        try
+        {
+            var d = exVal?.IsReference == true ? exVal.DereferencedValue : exVal;
+            ulong addr = d == null ? 0 : d.Address;
+            if (addr == 0) return null;
+            var o = Program.Session.ClrRuntime.Heap.GetObject(addr);
+            return o.Type == null ? null : o.ReadStringField("_message");
+        }
+        catch { return null; }
     }
 
     private static CorValue? ResolveRoot(CorFrame frame, string root)
