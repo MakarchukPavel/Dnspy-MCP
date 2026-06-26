@@ -81,6 +81,22 @@ public static class SessionHandlers
                 };
             });
 
+        d.Register("session.launch",
+            "[DEBUG] Launch a .NET Framework EXE UNDER the debugger and break at its managed entry point. The debugger is present before any module loads, so JIT optimization is disabled for every module — func-eval (eval.call) works even on Release/optimized assemblies (a late attach cannot achieve this). Detaches any current target first. Params: {exePath:string (absolute), args?:string, workingDir?:string}. Returns {launched, pid, description}. On return the process is PAUSED at the entry point — set breakpoints, then step.go.",
+            args =>
+            {
+                var exePath = Dispatcher.Req<string>(args, "exePath");
+                var a = Dispatcher.Opt<string?>(args, "args", null);
+                var wd = Dispatcher.Opt<string?>(args, "workingDir", null);
+                Program.Session.LaunchProcess(exePath, a, wd);
+                return new
+                {
+                    launched = true,
+                    pid = Program.Session.Pid,
+                    description = Program.Session.Describe(),
+                };
+            });
+
         d.Register("session.detach",
             "[DEBUG] Detach from the current target. Agent keeps listening. Idempotent — detach without attach is a no-op.",
             _ =>

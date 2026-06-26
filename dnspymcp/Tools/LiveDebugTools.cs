@@ -104,6 +104,11 @@ public static class LiveDebugTools
     public static object LoadDump(AgentRegistry reg, string path, string? agent = null)
         => reg.Get(agent).Result("session.load_dump", new { path })!;
 
+    [McpServerTool(Name = "debug_launch")]
+    [Description("[DEBUG] Launch a .NET Framework executable UNDER the debugger and break at its managed entry point. Unlike debug_pid_attach, the debugger is present before any module loads, so JIT optimization is disabled for ALL modules — func-eval (debug_eval_call) then works even on Release/optimized assemblies, which a late attach cannot achieve (it hits BAD_START_POINT). Detaches any current target. On return the process is PAUSED at the entry point — set breakpoints, then debug_go. Params: exePath (absolute path on the agent's machine), args (optional), workingDir (optional), agent (optional). NOTE: this launches a process YOU control — for IIS-hosted apps you cannot launch w3wp yourself (deploy Debug, or attach early to a freshly-recycled worker).")]
+    public static object Launch(AgentRegistry reg, string exePath, string? args = null, string? workingDir = null, string? agent = null)
+        => reg.Get(agent).Result("session.launch", new { exePath, args, workingDir })!;
+
     [McpServerTool(Name = "debug_pid_attach")]
     [Description("[DEBUG] Ask the agent to attach its debugger to a local PID. If already attached, detaches first. Idempotent on the same pid. Optionally registers breakpoints atomically with the attach via initialBreakpointsJson — a JSON array of `{kind:\"by_name\"|\"il\"|\"native\", ...}` specs (matching debug_bp_set_by_name / debug_bp_set_il / debug_bp_set_native params). Closes the attach<->first-RPC race so very-early code paths get caught. Response carries `initialBreakpoints[]` per-spec results. Params: pid:int, initialBreakpointsJson (optional), agent (optional).")]
     public static object Attach(AgentRegistry reg, int pid, string? initialBreakpointsJson = null, string? agent = null)

@@ -130,6 +130,7 @@ debug_list_dotnet_processes
 
 # attach / detach (runtime — no agent restart needed)
 debug_pid_attach / debug_pid_detach
+debug_launch                                     # launch an EXE under the debugger (func-eval on Release)
 debug_load_dump                                  # passive postmortem analysis of a .dmp
 # debug_pid_attach also accepts initialBreakpointsJson to register BPs
 # atomically inside the attach handshake (closes the attach<->first-RPC race).
@@ -373,6 +374,28 @@ another (suspended) thread holds, it stalls until the timeout fires, then
 aborts. Prefer passive `debug_eval` whenever a field or auto-property answers
 the question. Not supported: type arguments that are themselves generic
 (`List<int>`) and value-type (struct) receivers.
+
+### Func-eval needs *debuggable* code (Release vs Debug, and `debug_launch`)
+
+Func-eval only works where the JIT produced **debuggable** (un-optimized,
+tracking-info) code. The agent's options provider already requests that for
+every module — but ICorDebug applies it **at module load**, so it only takes
+effect for modules that load *after* the debugger is present:
+
+- **Attaching to an already-running process** (`debug_pid_attach`): modules
+  already loaded (e.g. a warmed-up `w3wp`'s `Terrasoft.Core`) stay optimized →
+  func-eval there fails with `CORDBG_E_FUNC_EVAL_BAD_START_POINT`. Passive
+  tools still work fully; only func-eval is affected.
+- **Launching under the debugger** (`debug_launch`): the debugger is present
+  before any module loads, so **all** modules are debuggable → func-eval works
+  even on Release/optimized assemblies. Use this for any target you can start
+  yourself (a console app, a service).
+- **IIS / Creatio**: you can't launch `w3wp` yourself. Either **deploy the
+  build in Debug** (then a normal `debug_pid_attach` gives working func-eval —
+  verified), or attach to a *freshly recycled* worker **before** the Creatio
+  assemblies load (early-attach; the modules then load debuggable). Setting
+  `COMPlus_JITMinOpts=1` is **not** enough — it disables optimization but not
+  the debuggability tracking func-eval needs.
 
 ---
 

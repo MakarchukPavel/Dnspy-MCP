@@ -207,6 +207,91 @@ public sealed class DebuggerSession : IDisposable
     }
 
     /// <summary>
+    /// Launch a .NET Framework executable UNDER the debugger and break at its
+    /// managed entry point. Because the debugger is present before any module
+    /// loads, the JIT-disable options (see <see cref="DefaultDebugOptionsProvider"/>)
+    /// apply to every module — so func-eval works even on Release/optimized
+    /// assemblies (the thing a late attach can't achieve). Detaches any current
+    /// target first. Returns once the process is paused at the entry point.
+    /// </summary>
+    public void LaunchProcess(string exePath, string? args, string? workingDir)
+    {
+        lock (_lock)
+        {
+            if (string.IsNullOrWhiteSpace(exePath)) throw new ArgumentException("exePath is required");
+            if (!System.IO.File.Exists(exePath)) throw new System.IO.FileNotFoundException($"executable not found: {exePath}");
+
+            Detach();
+            LastExitedPid = null; LastExitReason = null; LastExitUtc = null;
+
+            _dbgThread = new DebuggerThread("dnspymcp-dbg");
+            _dbgThread.CallDispatcherRun();
+
+            Exception? launchError = null;
+            _dnDebugger = _dbgThread.Invoke(() =>
+            {
+                try
+                {
+                    var options = new DebugProcessOptions(new DesktopCLRTypeDebugInfo())
+                    {
+                        Filename = exePath,
+                        CommandLine = "\"" + exePath + "\"" + (string.IsNullOrEmpty(args) ? "" : " " + args),
+                        CurrentDirectory = string.IsNullOrWhiteSpace(workingDir) ? System.IO.Path.GetDirectoryName(exePath) : workingDir,
+                        DebugMessageDispatcher = _dbgThread.GetDebugMessageDispatcher(),
+                        DebugOptions = new DebugOptions { DebugOptionsProvider = new DefaultDebugOptionsProvider() },
+                        BreakProcessKind = BreakProcessKind.EntryPoint, // stop at managed entry, modules loaded + debuggable
+                        // Inherit the agent's environment — dndbg's CreateProcess NREs on a null
+                        // Environment, and an empty block would strip the child's env entirely.
+                        Environment = System.Environment.GetEnvironmentVariables()
+                            .Cast<System.Collections.DictionaryEntry>()
+                            .Select(de => new System.Collections.Generic.KeyValuePair<string, string>((string)de.Key, (string)(de.Value ?? "")))
+                            .ToArray(),
+                    };
+                    var dbg = DnDebugger.DebugProcess(options);
+
+                    // Same exception-interception callback wiring as Attach.
+                    var cbEvt = typeof(DnDebugger).GetEvent("DebugCallbackEvent");
+                    var cbMethod = typeof(DebuggerSession).GetMethod(nameof(OnDebugCallback),
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                    if (cbEvt?.EventHandlerType != null && cbMethod != null)
+                        cbEvt.AddEventHandler(dbg, Delegate.CreateDelegate(cbEvt.EventHandlerType, this, cbMethod));
+                    return dbg;
+                }
+                catch (Exception ex) { launchError = ex; return null!; }
+            });
+
+            if (launchError != null)
+            {
+                if (_dbgThread != null) { try { _dbgThread.Terminate(); } catch { } _dbgThread = null; }
+                _dnDebugger = null;
+                throw launchError;
+            }
+
+            // The dispatcher drives the process to its entry point and pauses there.
+            // Poll (don't hold an STA Invoke, so the dispatcher can run).
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            while (DateTime.UtcNow < deadline)
+            {
+                var st = OnDbg(() => _dnDebugger!.ProcessState);
+                if (st == DebuggerProcessState.Paused) break;
+                if (st == DebuggerProcessState.Terminated)
+                { Detach(); throw new InvalidOperationException("launched process terminated before reaching the entry point"); }
+                System.Threading.Thread.Sleep(50);
+            }
+            if (OnDbg(() => _dnDebugger!.ProcessState) != DebuggerProcessState.Paused)
+            { Detach(); throw new TimeoutException("launched process did not reach its entry point within 30s"); }
+
+            int pid = OnDbg(() => _dnDebugger!.Processes.FirstOrDefault()?.ProcessId ?? 0);
+            if (pid == 0) { Detach(); throw new InvalidOperationException("could not determine launched process id"); }
+            Pid = pid;
+
+            _clrMdTarget = DataTarget.AttachToProcess(pid, false);
+            _clrRuntime = _clrMdTarget.ClrVersions.FirstOrDefault()?.CreateRuntime();
+            StartDeathWatcher(pid);
+        }
+    }
+
+    /// <summary>
     /// Load a crash/process dump (.dmp) for passive postmortem analysis via
     /// ClrMD. No ICorDebug — the heap readers and struct decoding work, but
     /// live operations (breakpoints / stepping / frames / func-eval) do not.

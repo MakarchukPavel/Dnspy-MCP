@@ -560,6 +560,39 @@ def test_eval_call_object_args_and_multihop(live_agent, mcp):
         live_agent.call_json("debug_go")
 
 
+def test_launch_under_debugger(live_agent, mcp, testtarget_pid, testtarget_asm):
+    """debug_launch starts the target UNDER the debugger (paused at entry), so
+    every module loads with JIT optimization disabled and func-eval works. We
+    launch a second target instance, run to a breakpoint, eval, then clean it up
+    and restore the live attach. Skips when the host predates the tool."""
+    if not any(t.get("name") == "debug_launch" for t in mcp.list_tools()):
+        pytest.skip("debug_launch not in this MCP host build (rebuild dist via builder.ps1)")
+
+    launched_pid = None
+    try:
+        r = live_agent.call_json("debug_launch", {"exePath": str(testtarget_asm)})
+        assert r.get("launched") and r.get("pid"), r
+        launched_pid = r["pid"]
+
+        bp = live_agent.call_json("debug_bp_set_by_name", {
+            "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+            "methodName": "Inspect"})
+        live_agent.call_json("debug_go")
+        assert live_agent.call_json("debug_wait_paused", {"timeoutMs": 8000})["state"] == "Paused"
+
+        ts = live_agent.call_json("debug_eval_call", {"expr": "arg0.ToString()"})["value"]
+        assert ts.get("kind") == "string" and ts["value"].startswith("Widget("), ts
+        live_agent.call_json("debug_bp_delete", {"id": bp["id"]})
+        live_agent.call_json("debug_go")
+    finally:
+        live_agent.call_json("debug_pid_detach")
+        if launched_pid:
+            import subprocess
+            subprocess.run(["taskkill", "/F", "/PID", str(launched_pid)], capture_output=True)
+        # Restore the shared live session for subsequent tests.
+        live_agent.call_json("debug_pid_attach", {"pid": testtarget_pid})
+
+
 def test_load_dump_postmortem(live_agent, mcp, testtarget_pid):
     """debug_load_dump: snapshot the test target to a full .dmp, load it, and
     confirm passive heap walk + struct decoding work on the dump. Restores the
