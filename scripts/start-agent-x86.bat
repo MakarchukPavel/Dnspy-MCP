@@ -33,7 +33,7 @@ for %%I in ("%~dp0..\dist\dnspymcpagent-x86\dnspymcpagent.exe") do set "AGENT=%%
 if not exist "%AGENT%" (
     echo ERROR: x86 agent exe not found:
     echo   %AGENT%
-    echo Build it first: run build-fast.bat (or build-full.bat).
+    echo Build it first: run build-fast.bat or build-full.bat.
     pause
     exit /b 1
 )

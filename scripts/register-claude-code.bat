@@ -21,7 +21,7 @@ for %%I in ("%~dp0..\dist\dnspymcp\dnspymcp.exe") do set "HOST_EXE=%%~fI"
 if not exist "%HOST_EXE%" (
     echo ERROR: host exe not found:
     echo   %HOST_EXE%
-    echo Build the host first: run build-fast.bat (or build-full.bat).
+    echo Build the host first: run build-fast.bat or build-full.bat.
     pause
     exit /b 1
 )
