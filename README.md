@@ -146,8 +146,15 @@ debug_list_modules / debug_find_type / debug_list_type_methods
 debug_bp_set_il / debug_bp_set_by_name / debug_bp_set_native
 debug_bp_list / debug_bp_delete / debug_bp_enable / debug_bp_disable
 
+# exception interception (break on a thrown managed exception)
+debug_exception_break_set    # mode: all | unhandled | by_type  (+ typeName, firstChance)
+debug_exception_break_clear
+# debug_wait_paused returns an exceptionHit block {type,message,hResult,unhandled,thread}
+# when an armed filter stops the target at a throw.
+
 # heap (ClrMD)
 debug_heap_find_instances / debug_heap_read_object
+debug_heap_read_array                            # elements of a List<T> backing / T[]
 debug_heap_read_string / debug_heap_stats
 
 # memory
@@ -176,6 +183,15 @@ its lifetime, no restart required. Target-process death auto-detaches
 and the agent itself keeps listening, ready for the next attach. For
 offline crash-dump analysis use IDA / WinDbg MCPs — dnspymcp is
 live-attach only.
+
+**Runtimes & bitness.** The agent attaches to both classic **.NET Framework**
+(4.x desktop CLR) and **.NET Core / .NET 5–9+** (CoreCLR) targets — it detects
+the runtime from the target's loaded `coreclr.dll` and bundles the matching
+`dbgshim`. ICorDebug requires the debugger bitness to match the debuggee's, so
+run the **x64** agent for 64-bit targets and the **x86** agent for 32-bit ones.
+`builder.ps1` produces both: `dist/dnspymcpagent` (x64) and
+`dist/dnspymcpagent-x86` (x86) — see [`scripts/`](#helper-scripts-scripts) for
+ready launchers (x64 on :5555, x86 on :5556).
 
 Protocol: one NDJSON request per line, one NDJSON response per line.
 
