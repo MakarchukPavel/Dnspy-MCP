@@ -105,9 +105,16 @@ Write-Host "==> publishing dnspymcp (net9)"
 & dotnet publish (Join-Path $root 'dnspymcp/dnspymcp.csproj') -c $Configuration --self-contained false -o (Join-Path $distDir 'dnspymcp')
 if ($LASTEXITCODE -ne 0) { throw "dnspymcp build failed" }
 
-Write-Host "==> building dnspymcpagent (net48)"
-& dotnet build (Join-Path $root 'dnspymcpagent/dnspymcpagent.csproj') -c $Configuration -o (Join-Path $distDir 'dnspymcpagent')
-if ($LASTEXITCODE -ne 0) { throw "dnspymcpagent build failed" }
+# The debugger bitness must match the debuggee's, so we ship both an x64 and an
+# x86 agent. x64 -> dist/dnspymcpagent (default), x86 -> dist/dnspymcpagent-x86.
+# (lib/ is AnyCPU managed dnSpy, reused by both; only dbgshim is per-arch.)
+Write-Host "==> building dnspymcpagent x64 (net48)"
+& dotnet build (Join-Path $root 'dnspymcpagent/dnspymcpagent.csproj') -c $Configuration -p:PlatformTarget=x64 -o (Join-Path $distDir 'dnspymcpagent')
+if ($LASTEXITCODE -ne 0) { throw "dnspymcpagent x64 build failed" }
+
+Write-Host "==> building dnspymcpagent x86 (net48)"
+& dotnet build (Join-Path $root 'dnspymcpagent/dnspymcpagent.csproj') -c $Configuration -p:PlatformTarget=x86 -o (Join-Path $distDir 'dnspymcpagent-x86')
+if ($LASTEXITCODE -ne 0) { throw "dnspymcpagent x86 build failed" }
 
 # dnspymcptest is the integration test target: an idle .NET process the test
 # fixture spawns and the agent attaches to. Built unconditionally Debug so

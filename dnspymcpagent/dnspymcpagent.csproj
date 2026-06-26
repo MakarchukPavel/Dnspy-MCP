@@ -7,8 +7,10 @@
     <Nullable>enable</Nullable>
     <AssemblyName>dnspymcpagent</AssemblyName>
     <RootNamespace>DnSpyMcp.Agent</RootNamespace>
-    <Platforms>x64</Platforms>
-    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64;x86</Platforms>
+    <!-- Built once per arch (builder.ps1 passes -p:PlatformTarget=x64 / x86). The debugger
+         bitness MUST match the debuggee's: an x64 agent debugs only x64 processes, x86 only x86. -->
+    <PlatformTarget Condition="'$(PlatformTarget)' == '' Or '$(PlatformTarget)' == 'AnyCPU'">x64</PlatformTarget>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
@@ -24,7 +26,8 @@
          targets (dndbg's CoreCLRHelper calls EnumerateCLRs / CreateDebuggingInterfaceFromVersion).
          Reference the RID-specific package directly (the meta-package doesn't reliably copy
          native bits). Copied next to the agent exe by the CopyDbgShimNative target below. -->
-    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" Version="9.0.661903" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" Version="9.0.661903" GeneratePathProperty="true" Condition="'$(PlatformTarget)' == 'x64'" />
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x86" Version="9.0.661903" GeneratePathProperty="true" Condition="'$(PlatformTarget)' == 'x86'" />
   </ItemGroup>
 
   <ItemGroup>
@@ -69,8 +72,11 @@
   <!-- Copy native dbgshim.dll next to the agent exe so DebuggerSession.FindDbgShim()
        locates it for CoreCLR attach. The RID package ships it under runtimes/win-x64/native. -->
   <Target Name="CopyDbgShimNative" AfterTargets="Build;Publish">
-    <ItemGroup>
+    <ItemGroup Condition="'$(PlatformTarget)' == 'x64'">
       <_DbgShimDll Include="$(PkgMicrosoft_Diagnostics_DbgShim_win_x64)\runtimes\win-x64\native\dbgshim.dll" />
+    </ItemGroup>
+    <ItemGroup Condition="'$(PlatformTarget)' == 'x86'">
+      <_DbgShimDll Include="$(PkgMicrosoft_Diagnostics_DbgShim_win_x86)\runtimes\win-x86\native\dbgshim.dll" />
     </ItemGroup>
     <Copy SourceFiles="@(_DbgShimDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('%(_DbgShimDll.FullPath)')" />
   </Target>
