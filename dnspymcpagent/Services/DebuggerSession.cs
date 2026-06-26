@@ -96,7 +96,7 @@ public sealed class DebuggerSession : IDisposable
             {
                 try
                 {
-                    var attachInfo = new DesktopCLRTypeAttachInfo(string.Empty);
+                    var attachInfo = BuildAttachInfo(pid);
                     // DebugOptions.DebugOptionsProvider is non-nullable — if left null, the
                     // CreateProcess callback handler inside dndbg dereferences it and throws
                     // NRE. The exception is swallowed by OnManagedCallbackFromAnyThread2 and
@@ -389,6 +389,55 @@ public sealed class DebuggerSession : IDisposable
         var mdi = exactType.GetMetaDataImport(out uint token);
         if (mdi is null) return null;
         return MetaDataUtils.FullTypeName(mdi, token);
+    }
+
+    // ---- runtime detection (desktop CLR vs CoreCLR) ----------------------
+    // Decide which attach-info to hand DnDebugger.Attach for a target pid.
+    // CoreCLR is detected by the loaded coreclr.dll module; the .NET Framework
+    // path is unchanged (DesktopCLRTypeAttachInfo). For CoreCLR we pass the path
+    // to a bundled dbgshim.dll — dndbg's CoreCLRHelper then resolves the exact
+    // runtime version and the matching mscordbi/mscordaccore next to the
+    // debuggee's coreclr.dll. Works for .NET Core 2.1 .. .NET 9+ (x64).
+    private static CLRTypeAttachInfo BuildAttachInfo(int pid)
+    {
+        string? coreclrPath = null;
+        try
+        {
+            using (var proc = Process.GetProcessById(pid))
+            {
+                foreach (ProcessModule m in proc.Modules)
+                {
+                    if (string.Equals(m.ModuleName, "coreclr.dll", StringComparison.OrdinalIgnoreCase))
+                    {
+                        coreclrPath = m.FileName;
+                        break;
+                    }
+                }
+            }
+        }
+        catch { /* cross-bitness / access denied — assume desktop; a wrong guess surfaces a clear attach error */ }
+
+        if (coreclrPath != null)
+        {
+            var dbgShim = FindDbgShim()
+                ?? throw new InvalidOperationException(
+                    $"pid={pid} is .NET Core (coreclr.dll loaded) but dbgshim.dll was not found next to the agent. " +
+                    "Rebuild the agent with the Microsoft.Diagnostics.DbgShim.win-x64 NuGet package.");
+            // version=null => dndbg/dbgshim auto-resolves the exact CoreCLR version for this pid.
+            return new CoreCLRTypeAttachInfo(null, dbgShim, coreclrPath);
+        }
+        return new DesktopCLRTypeAttachInfo(string.Empty);
+    }
+
+    private static string? FindDbgShim()
+    {
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        foreach (var rel in new[] { "dbgshim.dll", @"runtimes\win-x64\native\dbgshim.dll" })
+        {
+            var p = System.IO.Path.Combine(baseDir, rel);
+            if (System.IO.File.Exists(p)) return p;
+        }
+        return null;
     }
 
     public string Describe()

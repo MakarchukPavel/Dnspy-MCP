@@ -20,6 +20,11 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="Microsoft.Diagnostics.Runtime" Version="4.0.722401" />
     <PackageReference Include="Iced" Version="1.21.0" />
+    <!-- Native dbgshim.dll — required to attach the debugger to .NET Core / CoreCLR
+         targets (dndbg's CoreCLRHelper calls EnumerateCLRs / CreateDebuggingInterfaceFromVersion).
+         Reference the RID-specific package directly (the meta-package doesn't reliably copy
+         native bits). Copied next to the agent exe by the CopyDbgShimNative target below. -->
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" Version="9.0.661903" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup>
@@ -60,5 +65,14 @@
       <Private>true</Private>
     </Reference>
   </ItemGroup>
+
+  <!-- Copy native dbgshim.dll next to the agent exe so DebuggerSession.FindDbgShim()
+       locates it for CoreCLR attach. The RID package ships it under runtimes/win-x64/native. -->
+  <Target Name="CopyDbgShimNative" AfterTargets="Build;Publish">
+    <ItemGroup>
+      <_DbgShimDll Include="$(PkgMicrosoft_Diagnostics_DbgShim_win_x64)\runtimes\win-x64\native\dbgshim.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DbgShimDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('%(_DbgShimDll.FullPath)')" />
+  </Target>
 
 </Project>
