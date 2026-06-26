@@ -274,6 +274,70 @@ public static class HeapHandlers
                     value,
                 };
             });
+
+        d.Register("heap.references",
+            "[DEBUG] List the objects an object points TO (outbound references), with the field/array-element each came from. Use to walk an object graph forward. Params: {address:ulong, max?:int=128}. Returns {address, type, count, references:[{field, isArrayElement, offset, target:{type,address}}]}.",
+            p =>
+            {
+                var address = Dispatcher.Req<ulong>(p, "address");
+                var max = Dispatcher.Opt<int>(p, "max", 128);
+                var heap = Program.Session.ClrRuntime.Heap;
+                var obj = heap.GetObject(address);
+                if (obj.Type == null) throw new ArgumentException($"no type at 0x{address:X}");
+                var refs = new List<object>();
+                foreach (var r in obj.EnumerateReferencesWithFields(true, true))
+                {
+                    if (refs.Count >= max) break;
+                    var o = r.Object;
+                    refs.Add(new
+                    {
+                        field = r.Field?.Name,
+                        isArrayElement = r.IsArrayElement,
+                        offset = r.Offset,
+                        target = o.IsNull ? null : new { type = o.Type?.Name, address = $"0x{o.Address:X}" },
+                    });
+                }
+                return new { address = (long)address, type = obj.Type.Name, count = refs.Count, references = refs };
+            });
+
+        d.Register("heap.referencing",
+            "[DEBUG] Find which objects REFERENCE a given object (inbound references) — the 'who is keeping this alive / why isn't it collected' tool. Walks the whole managed heap (can be slow on a large process; capped by `max`). Reports the referring object + the field/array-element that points at the target. Params: {address:ulong, max?:int=50}. Returns {target, scanned, returned, truncated, referrers:[{address, type, field, isArrayElement}]}. Pair with heap.references (outbound) to trace retention toward a GC root.",
+            p =>
+            {
+                var target = Dispatcher.Req<ulong>(p, "address");
+                var max = Dispatcher.Opt<int>(p, "max", 50);
+                if (max <= 0) max = 50;
+                var heap = Program.Session.ClrRuntime.Heap;
+                if (!heap.CanWalkHeap) throw new InvalidOperationException("heap not walkable in current state");
+                var referrers = new List<object>();
+                long scanned = 0;
+                foreach (var obj in heap.EnumerateObjects())
+                {
+                    scanned++;
+                    if (obj.Type == null || obj.Address == target) continue;
+                    foreach (var r in obj.EnumerateReferencesWithFields(false, true))
+                    {
+                        if (r.Object.Address != target) continue;
+                        referrers.Add(new
+                        {
+                            address = $"0x{obj.Address:X}",
+                            type = obj.Type.Name,
+                            field = r.Field?.Name,
+                            isArrayElement = r.IsArrayElement,
+                        });
+                        break; // one record per referring object
+                    }
+                    if (referrers.Count >= max) break;
+                }
+                return new
+                {
+                    target = $"0x{target:X}",
+                    scanned,
+                    returned = referrers.Count,
+                    truncated = referrers.Count >= max,
+                    referrers,
+                };
+            });
     }
 
     /// <summary>First field on a type matching any of the candidate names (BCL layouts differ across Framework/Core).</summary>

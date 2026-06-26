@@ -188,6 +188,26 @@ def test_heap_read_collection(live_agent, mcp):
     assert kv == {"alpha": 1, "beta": 2, "gamma": 3}, d
 
 
+def test_heap_references_and_referencing(live_agent, mcp):
+    """debug_heap_references (outbound) lists what an object points to with field
+    names; debug_heap_referencing (inbound) finds who points at it. A Widget
+    points to its Name (string) and Link; it's held by the AliveWidgets backing
+    Widget[]. Skips if the host predates the tools."""
+    if not any(t.get("name") == "debug_heap_referencing" for t in mcp.list_tools()):
+        pytest.skip("debug_heap_referencing not in this MCP host build (rebuild dist via builder.ps1)")
+    rows = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "Widget", "max": 64}))
+    w = next(r for r in rows if (r.get("type") or "").endswith(".Widget"))
+    addr = w["address"]
+
+    out = live_agent.call_json("debug_heap_references", {"address": str(int(addr))})
+    fields = {r.get("field") or "" for r in out["references"]}
+    assert any("Name" in f for f in fields), out
+
+    inb = live_agent.call_json("debug_heap_referencing", {"address": str(int(addr)), "max": 10})
+    assert inb["returned"] >= 1 and not inb["truncated"], inb
+    assert any("Widget[]" in (r.get("type") or "") for r in inb["referrers"]), inb
+
+
 def test_heap_read_string(live_agent):
     strs = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "System.String", "max": 1}))
     if not strs:

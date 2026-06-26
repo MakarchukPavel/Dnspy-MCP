@@ -340,6 +340,16 @@ public static class LiveDebugTools
     public static object HeapStats(AgentRegistry reg, int top = 25, int offset = 0, int max = 200, string? agent = null)
         => Paging.PageJsonArray(reg.Get(agent).Result("heap.stats", new { top }), offset, max);
 
+    [McpServerTool(Name = "debug_heap_references")]
+    [Description("[DEBUG] List the objects an object points TO (outbound references) with the field/array-element each came from — walk an object graph forward. Params: address (ulong as string — decimal or hex), max=128, agent (optional). Returns references:[{field, isArrayElement, offset, target:{type,address}}].")]
+    public static object HeapReferences(AgentRegistry reg, string address, int max = 128, string? agent = null)
+        => reg.Get(agent).Result("heap.references", new { address = Numbers.ParseUInt64(address, "address"), max })!;
+
+    [McpServerTool(Name = "debug_heap_referencing")]
+    [Description("[DEBUG] Find which objects REFERENCE a given object (inbound references) — the 'who is keeping this alive / why isn't it collected' tool, with the field/array-element that points at it. Walks the WHOLE managed heap (can be slow on a large process like w3wp; capped by max). Params: address (ulong as string — decimal or hex), max=50, agent (optional). Returns {target, scanned, returned, truncated, referrers:[{address,type,field,isArrayElement}]}. Pair with debug_heap_references (outbound) to trace retention toward a GC root.")]
+    public static object HeapReferencing(AgentRegistry reg, string address, int max = 50, string? agent = null)
+        => reg.Get(agent).Result("heap.referencing", new { address = Numbers.ParseUInt64(address, "address"), max })!;
+
     [McpServerTool(Name = "debug_heap_static_field")]
     [Description("[DEBUG] Read a STATIC field of a type — the entry point into singletons / caches / feature toggles (e.g. read AppManager's instance static, then drill into the live object graph with debug_heap_read_object). Statics are per-AppDomain; by default reads the first AppDomain where the field is initialized. Value is decoded like debug_heap_read_object (primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address}). Params: typeName (FULL type name, e.g. 'Terrasoft.Core.AppConnection'), fieldName, appDomainIndex=-1 (or a specific index), agent (optional).")]
     public static object HeapStaticField(AgentRegistry reg, string typeName, string fieldName, int appDomainIndex = -1, string? agent = null)

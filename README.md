@@ -165,6 +165,7 @@ debug_heap_read_array                            # elements of a List<T> backing
 debug_heap_read_collection                       # List<T> -> elements, Dictionary<K,V> -> {key,value}
 debug_heap_read_string / debug_heap_stats
 debug_heap_static_field                          # read a type's static field (entry into singletons)
+debug_heap_references / debug_heap_referencing   # outbound refs / who-references-this (retention)
 
 # memory
 debug_memory_read / debug_memory_write / debug_memory_read_int / debug_disasm
