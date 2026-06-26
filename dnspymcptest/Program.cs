@@ -15,6 +15,10 @@ internal static class Program
     // Static Dictionary for heap.read_collection verification.
     public static readonly Dictionary<string, int> Counters =
         new Dictionary<string, int> { ["alpha"] = 1, ["beta"] = 2, ["gamma"] = 3 };
+    // Deliberate managed leak: one LeakNode is appended every tick and never
+    // removed — a deterministic, growing target for heap.snapshot_diff /
+    // heap.leak_report / heap.retention_path (retention leads back to this list).
+    public static readonly List<object> Leaks = new();
 
     private static void Main(string[] args)
     {
@@ -33,6 +37,7 @@ internal static class Program
         while (!loopCancel.IsSet)
         {
             TickCounter++;
+            Leaks.Add(new LeakNode(TickCounter));   // deliberate, ever-growing leak
             StateLabel = TickCounter % 2 == 0 ? "even" : "odd";
             var result = Compute(TickCounter, TickCounter * 3);
             // Pass a Widget through a method each tick so value-based breakpoint
@@ -85,6 +90,16 @@ internal static class Program
             tmp.Add(new Widget($"churn-{i}", i));
         tmp.Clear();
     }
+}
+
+// One node of the deliberate leak (Program.Leaks). A distinct app type so
+// heap.snapshot_diff shows its count climbing and heap.retention_path traces it
+// back to the static list.
+public sealed class LeakNode
+{
+    public int Seq;
+    public string Tag;
+    public LeakNode(int seq) { Seq = seq; Tag = "leak-" + seq; }
 }
 
 // Top-level + nested type pair used by reverse_list_methods nested-type

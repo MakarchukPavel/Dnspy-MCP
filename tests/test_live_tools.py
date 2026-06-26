@@ -246,6 +246,52 @@ def test_heap_retention_path(live_agent, mcp):
     assert "List" in types or "Widget[]" in types, rp
 
 
+def test_heap_leak_report(live_agent, mcp):
+    """debug_heap_leak_report: top-N histogram (count-ordered) + auto-retention on
+    the top non-noise types in one call. Skips if the host predates it."""
+    if not any(t.get("name") == "debug_heap_leak_report" for t in mcp.list_tools()):
+        pytest.skip("debug_heap_leak_report not in this MCP host build (rebuild dist via builder.ps1)")
+    r = live_agent.call_json("debug_heap_leak_report", {"top": 15, "retentionFor": 3})
+    assert r["totalObjects"] > 0 and r["top"], r
+    counts = [row["count"] for row in r["top"]]
+    assert counts == sorted(counts, reverse=True), counts
+    # System.String is the canonical noise type and must NOT get auto-retention.
+    for row in r["top"]:
+        if row["type"] == "System.String":
+            assert row.get("retention") is None, row
+    # At least one non-noise top type got a retention path (e.g. System.RuntimeType).
+    assert any(row.get("retention") for row in r["top"]), r
+
+
+def test_heap_snapshot_and_diff(live_agent, mcp):
+    """debug_heap_snapshot + debug_heap_snapshot_diff detect growth over time. The
+    test target leaks one LeakNode per tick into a static list, so a diff across a
+    few seconds shows LeakNode growth with a retention path to the static List.
+    Skips if the host predates the tools."""
+    if not any(t.get("name") == "debug_heap_snapshot_diff" for t in mcp.list_tools()):
+        pytest.skip("debug_heap_snapshot_diff not in this MCP host build (rebuild dist via builder.ps1)")
+    _drain_bps(live_agent)  # ensure the leak loop is running (not paused on a bp)
+
+    s1 = live_agent.call_json("debug_heap_snapshot", {"label": "t0"})
+    assert s1["id"] >= 1 and s1["totalObjects"] > 0, s1
+    listed = live_agent.call_json("debug_heap_snapshot_list")
+    assert any(x["id"] == s1["id"] for x in listed), listed
+
+    time.sleep(3.5)  # ~6-7 ticks -> ~6-7 new LeakNodes
+    s2 = live_agent.call_json("debug_heap_snapshot", {"label": "t1"})
+
+    diff = live_agent.call_json("debug_heap_snapshot_diff",
+                                {"before": s1["id"], "after": s2["id"], "retentionFor": 3})
+    assert diff["before"] == s1["id"] and diff["after"] == s2["id"], diff
+    leak = next((r for r in diff["types"] if r["type"].endswith("LeakNode")), None)
+    assert leak is not None, [r["type"] for r in diff["types"]]
+    assert leak["deltaCount"] >= 1 and leak["countAfter"] > leak["countBefore"], leak
+    # Auto-retention on the grown leak type traces back to the static List.
+    rp = leak.get("retention")
+    assert rp and rp["rooted"], rp
+    assert any("List" in (h.get("type") or "") for h in rp["path"]), rp
+
+
 def test_heap_read_string(live_agent):
     strs = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "System.String", "max": 1}))
     if not strs:

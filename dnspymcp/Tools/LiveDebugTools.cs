@@ -365,6 +365,32 @@ public static class LiveDebugTools
     public static object HeapRetentionPath(AgentRegistry reg, string address, string? agent = null)
         => reg.Get(agent).Result("heap.retention_path", new { address = Numbers.ParseUInt64(address, "address") })!;
 
+    [McpServerTool(Name = "debug_heap_leak_report")]
+    [Description("[DEBUG] One-call leak triage: a top-N type histogram (count + total size) over the whole heap PLUS an automatic retention path for the top suspicious types — what's biggest AND why it's alive, in one shot. Params: top=20, bySize=false (default orders by instance COUNT), typeFilter (optional substring to focus), retentionFor=3 (auto-retention for this many top non-noise types; 0 disables), agent (optional). Returns {typeCount, totalObjects, totalSize, top:[{type,count,totalSize,sampleAddress,retention?}]}. Auto-retention skips ubiquitous noise (System.String, System.*[]). For growth over TIME use debug_heap_snapshot + debug_heap_snapshot_diff.")]
+    public static object HeapLeakReport(AgentRegistry reg, int top = 20, bool bySize = false, string? typeFilter = null, int retentionFor = 3, string? agent = null)
+        => reg.Get(agent).Result("heap.leak_report", new { top, bySize, typeFilter, retentionFor })!;
+
+    [McpServerTool(Name = "debug_heap_snapshot")]
+    [Description("[DEBUG] Capture a heap type-histogram snapshot (per-type count + total size) and store it on the agent for later diffing. Params: label (optional), top=25, agent (optional). Returns {id, label, takenUtc, totalObjects, totalSize, typeCount, top:[...]}. WORKFLOW: snapshot -> exercise the app (repeat the suspect operation N times) -> snapshot -> debug_heap_snapshot_diff the two ids; types whose count grew are leak suspects. Snapshots are lightweight; the agent keeps the last 20 and clears them on detach.")]
+    public static object HeapSnapshot(AgentRegistry reg, string? label = null, int top = 25, string? agent = null)
+        => reg.Get(agent).Result("heap.snapshot", new { label, top })!;
+
+    [McpServerTool(Name = "debug_heap_snapshot_list")]
+    [Description("[DEBUG] List heap snapshots stored on the agent: [{id, label, takenUtc, totalObjects, totalSize, typeCount}] oldest-first.")]
+    public static object HeapSnapshotList(AgentRegistry reg, string? agent = null)
+        => reg.Get(agent).Result("heap.snapshot_list")!;
+
+    [McpServerTool(Name = "debug_heap_snapshot_diff")]
+    [Description("[DEBUG] Diff two heap snapshots to find what GREW between them — the core managed-leak workflow. Params: before (snapshot id), after (optional; default newest snapshot), top=25, onlyGrowth=true, retentionFor=3, agent (optional). Returns {before, after, types:[{type, countBefore, countAfter, deltaCount, deltaSize, retention?}]} sorted by deltaCount desc. retentionFor>0 auto-runs a retention path on a CURRENT live instance of the top-K grown non-noise types (one batched whole-heap index). Take snapshots around a repeated operation; types with positive deltaCount that keep climbing are the leak.")]
+    public static object HeapSnapshotDiff(AgentRegistry reg, int before, int? after = null, int top = 25, bool onlyGrowth = true, int retentionFor = 3, string? agent = null)
+    {
+        // Omit 'after' when unset so the agent defaults it to the newest snapshot.
+        object payload = after.HasValue
+            ? new { before, after = after.Value, top, onlyGrowth, retentionFor }
+            : new { before, top, onlyGrowth, retentionFor };
+        return reg.Get(agent).Result("heap.snapshot_diff", payload)!;
+    }
+
     [McpServerTool(Name = "debug_heap_static_field")]
     [Description("[DEBUG] Read a STATIC field of a type — the entry point into singletons / caches / feature toggles (e.g. read AppManager's instance static, then drill into the live object graph with debug_heap_read_object). Statics are per-AppDomain; by default reads the first AppDomain where the field is initialized. Value is decoded like debug_heap_read_object (primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address}). Params: typeName (FULL type name, e.g. 'Terrasoft.Core.AppConnection'), fieldName, appDomainIndex=-1 (or a specific index), agent (optional).")]
     public static object HeapStaticField(AgentRegistry reg, string typeName, string fieldName, int appDomainIndex = -1, string? agent = null)

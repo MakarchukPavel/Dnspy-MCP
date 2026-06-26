@@ -347,7 +347,7 @@ public static class HeapHandlers
                 var typeFilter = Dispatcher.Opt<string?>(p, "typeFilter", null);
                 var max = Dispatcher.Opt<int>(p, "max", 200);
                 if (max <= 0) max = 200;
-                var heap = Program.Session.ClrRuntime.Heap;
+                var heap = FreshHeap();
                 if (!heap.CanWalkHeap) throw new InvalidOperationException("heap not walkable in current state");
 
                 var summary = new Dictionary<string, long>();
@@ -380,47 +380,246 @@ public static class HeapHandlers
             p =>
             {
                 var addr = Dispatcher.Req<ulong>(p, "address");
-                var heap = Program.Session.ClrRuntime.Heap;
+                var heap = FreshHeap();
                 if (!heap.CanWalkHeap) throw new InvalidOperationException("heap not walkable in current state");
                 var target = heap.GetObject(addr);
                 if (target.Type == null) throw new ArgumentException($"no type at 0x{addr:X}");
 
-                // GCRoot is configured with the target(s); EnumerateRootPaths yields
-                // (root, chain) pairs for every GC root that reaches the target. The
-                // first path is enough to answer "why is this alive"; the ClrRoot
-                // gives us the anchoring root kind directly.
-                var gcroot = new GCRoot(heap, new ulong[] { addr });
-                string? rootKind = null;
-                List<ulong>? addrs = null;
-                foreach (var pair in gcroot.EnumerateRootPaths())
+                var paths = BuildRetentionPaths(heap, new[] { addr });
+                return paths.TryGetValue(addr, out var rp)
+                    ? rp
+                    : new { target = $"0x{addr:X}", rooted = false, rootKind = (string?)null, depth = 0, path = (object)Array.Empty<object>() };
+            });
+
+        d.Register("heap.leak_report",
+            "[DEBUG] One-call leak triage: a top-N type histogram (count + total size) over the whole heap, PLUS an automatic retention path for the top suspicious types — so you see what's biggest AND why it's alive in one shot. Params: {top?:int=20, bySize?:bool=false (default orders by instance COUNT), typeFilter?:string (substring to focus on), retentionFor?:int=3 (auto-retention for this many of the top non-noise types; 0 disables)}. Returns {typeCount, totalObjects, totalSize, top:[{type, count, totalSize, sampleAddress, retention?}]}. Auto-retention skips ubiquitous noise (System.String, System.*[] arrays); use retention paths to spot static caches / un-removed handlers. For growth over time use heap.snapshot + heap.snapshot_diff instead.",
+            p =>
+            {
+                var top = Dispatcher.Opt<int>(p, "top", 20);
+                var bySize = Dispatcher.Opt<bool>(p, "bySize", false);
+                var typeFilter = Dispatcher.Opt<string?>(p, "typeFilter", null);
+                var retentionFor = Math.Max(0, Dispatcher.Opt<int>(p, "retentionFor", 3));
+                var heap = FreshHeap();
+                if (!heap.CanWalkHeap) throw new InvalidOperationException("heap not walkable in current state");
+
+                var agg = BuildHistogram(heap);
+                long totalObjects = 0, totalSize = 0;
+                foreach (var a in agg.Values) { totalObjects += a.Count; totalSize += (long)a.Size; }
+
+                var ordered = agg
+                    .Where(kv => typeFilter == null || kv.Key.IndexOf(typeFilter, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .OrderByDescending(kv => bySize ? (double)kv.Value.Size : kv.Value.Count)
+                    .Take(Math.Max(1, top))
+                    .ToList();
+
+                // Batch one retention index over a live sample of the top non-noise types.
+                var retentionTargets = ordered
+                    .Where(kv => !LikelyNoise(kv.Key))
+                    .Take(retentionFor)
+                    .Select(kv => kv.Value.SampleAddress)
+                    .ToArray();
+                var retention = retentionFor > 0 && retentionTargets.Length > 0
+                    ? BuildRetentionPaths(heap, retentionTargets)
+                    : new Dictionary<ulong, object>();
+
+                var rows = ordered.Select(kv => new
                 {
-                    rootKind = pair.Item1.RootKind.ToString();
-                    addrs = new List<ulong>();
-                    for (var n = pair.Item2; n != null; n = n.Next) addrs.Add(n.Object);
-                    break;
+                    type = kv.Key,
+                    count = kv.Value.Count,
+                    totalSize = (long)kv.Value.Size,
+                    sampleAddress = $"0x{kv.Value.SampleAddress:X}",
+                    retention = retention.TryGetValue(kv.Value.SampleAddress, out var r) ? r : null,
+                }).ToList();
+                return new { typeCount = agg.Count, totalObjects, totalSize, top = rows };
+            });
+
+        d.Register("heap.snapshot",
+            "[DEBUG] Capture a heap type-histogram snapshot (per-type count + total size) and store it on the agent for later diffing. Params: {label?:string, top?:int=25}. Returns {id, label, takenUtc, totalObjects, totalSize, typeCount, top:[{type,count,totalSize}]}. WORKFLOW: take one, exercise the app (repeat the suspect operation N times), take another, then heap.snapshot_diff the two ids — types whose count grew are leak suspects. Snapshots are lightweight (type->count/size only); the agent keeps the last 20 and clears them on detach.",
+            p =>
+            {
+                var label = Dispatcher.Opt<string?>(p, "label", null);
+                var top = Dispatcher.Opt<int>(p, "top", 25);
+                var heap = FreshHeap();
+                if (!heap.CanWalkHeap) throw new InvalidOperationException("heap not walkable in current state");
+
+                var agg = BuildHistogram(heap);
+                var snap = new HeapSnapshot { Label = label, TakenUtc = DateTime.UtcNow };
+                long totObj = 0, totSize = 0;
+                foreach (var kv in agg)
+                {
+                    snap.Histogram[kv.Key] = (kv.Value.Count, (long)kv.Value.Size);
+                    totObj += kv.Value.Count; totSize += (long)kv.Value.Size;
                 }
-                if (addrs == null || addrs.Count == 0)
-                    return new { target = $"0x{addr:X}", rooted = false, rootKind = (string?)null, depth = 0, path = (object)Array.Empty<object>() };
+                snap.TotalObjects = totObj; snap.TotalSize = totSize;
+                HeapSnapshotStore.Add(snap);
 
-                // Normalize so the path reads root -> ... -> target.
-                if (addrs[0] == addr) addrs.Reverse();
-
-                // Resolve each hop's type and the field on the previous object that points here.
-                var path = new List<object>();
-                for (int i = 0; i < addrs.Count; i++)
+                var topRows = agg.OrderByDescending(kv => kv.Value.Count).Take(top)
+                    .Select(kv => new { type = kv.Key, count = kv.Value.Count, totalSize = (long)kv.Value.Size }).ToList();
+                return new
                 {
-                    string? field = null;
-                    if (i > 0)
+                    id = snap.Id, label = snap.Label, takenUtc = snap.TakenUtc.ToString("o"),
+                    totalObjects = totObj, totalSize = totSize, typeCount = agg.Count, top = topRows,
+                };
+            });
+
+        d.Register("heap.snapshot_list",
+            "[DEBUG] List the heap snapshots currently stored on the agent. Returns [{id, label, takenUtc, totalObjects, totalSize, typeCount}] oldest-first.",
+            _ => HeapSnapshotStore.All.Select(s => new
+            {
+                id = s.Id, label = s.Label, takenUtc = s.TakenUtc.ToString("o"),
+                totalObjects = s.TotalObjects, totalSize = s.TotalSize, typeCount = s.Histogram.Count,
+            }).ToList());
+
+        d.Register("heap.snapshot_diff",
+            "[DEBUG] Diff two heap snapshots to find what GREW between them — the core managed-leak workflow. Reports per-type count/size deltas. Params: {before:int (snapshot id), after?:int (default: newest snapshot), top?:int=25, onlyGrowth?:bool=true, retentionFor?:int=3}. Returns {before, after, types:[{type, countBefore, countAfter, deltaCount, deltaSize, retention?}]} sorted by deltaCount desc. retentionFor>0 auto-runs a retention path on a CURRENT live instance of the top-K grown (non-noise) types (one batched whole-heap index). Take snapshots around a repeated operation; types with positive deltaCount that keep climbing are the leak.",
+            p =>
+            {
+                var beforeId = Dispatcher.Req<int>(p, "before");
+                var afterId = Dispatcher.Opt<int>(p, "after", HeapSnapshotStore.NewestId ?? beforeId);
+                var top = Dispatcher.Opt<int>(p, "top", 25);
+                var onlyGrowth = Dispatcher.Opt<bool>(p, "onlyGrowth", true);
+                var retentionFor = Math.Max(0, Dispatcher.Opt<int>(p, "retentionFor", 3));
+
+                if (!HeapSnapshotStore.TryGet(beforeId, out var before))
+                    throw new ArgumentException($"snapshot id {beforeId} not found (heap.snapshot_list to see ids)");
+                if (!HeapSnapshotStore.TryGet(afterId, out var after))
+                    throw new ArgumentException($"snapshot id {afterId} not found (heap.snapshot_list to see ids)");
+
+                var allTypes = new HashSet<string>(before.Histogram.Keys);
+                allTypes.UnionWith(after.Histogram.Keys);
+                var diffs = new List<(string type, long cb, long ca, long dc, long ds)>();
+                foreach (var t in allTypes)
+                {
+                    long cb = before.Histogram.TryGetValue(t, out var b) ? b.count : 0;
+                    long ca = after.Histogram.TryGetValue(t, out var a) ? a.count : 0;
+                    long sb = before.Histogram.TryGetValue(t, out var b2) ? b2.size : 0;
+                    long sa = after.Histogram.TryGetValue(t, out var a2) ? a2.size : 0;
+                    long dc = ca - cb;
+                    if (onlyGrowth && dc <= 0) continue;
+                    diffs.Add((t, cb, ca, dc, sa - sb));
+                }
+                var ordered = diffs.OrderByDescending(x => x.dc).Take(Math.Max(1, top)).ToList();
+
+                // Auto-retention: sample a CURRENT live instance of the top grown
+                // non-noise types (snapshots store no addresses), then batch one index.
+                var heap = FreshHeap();
+                var retention = new Dictionary<string, object>();
+                if (retentionFor > 0 && heap.CanWalkHeap)
+                {
+                    var wantTypes = ordered.Where(x => !LikelyNoise(x.type)).Take(retentionFor)
+                                           .Select(x => x.type).ToList();
+                    if (wantTypes.Count > 0)
                     {
-                        var prev = heap.GetObject(addrs[i - 1]);
-                        foreach (var rf in prev.EnumerateReferencesWithFields(false, true))
-                            if (rf.Object.Address == addrs[i]) { field = rf.Field?.Name ?? (rf.IsArrayElement ? "[]" : null); break; }
+                        var sample = SampleAddressesForTypes(heap, new HashSet<string>(wantTypes));
+                        var paths = BuildRetentionPaths(heap, sample.Values.ToArray());
+                        foreach (var kv in sample)
+                            if (paths.TryGetValue(kv.Value, out var rp)) retention[kv.Key] = rp;
                     }
-                    path.Add(new { address = $"0x{addrs[i]:X}", type = heap.GetObject(addrs[i]).Type?.Name, field });
                 }
-                return new { target = $"0x{addr:X}", rooted = true, rootKind, depth = path.Count, path = (object)path };
+
+                var rows = ordered.Select(x => new
+                {
+                    type = x.type, countBefore = x.cb, countAfter = x.ca, deltaCount = x.dc, deltaSize = x.ds,
+                    retention = retention.TryGetValue(x.type, out var r) ? r : null,
+                }).ToList();
+                return new { before = beforeId, after = afterId, returned = rows.Count, types = rows };
             });
     }
+
+    /// <summary>
+    /// Flush ClrMD's cached heap/object data so the next walk reflects the CURRENT
+    /// process state, then return the heap. The ClrMD runtime is created once at
+    /// attach and otherwise serves its attach-time cached view — fatal for
+    /// snapshot diffing (two walks would be identical) and stale for any heap read
+    /// taken a while after attach. Flushing is safe to call repeatedly.
+    /// </summary>
+    private static ClrHeap FreshHeap()
+    {
+        var clr = Program.Session.ClrRuntime;
+        clr.FlushCachedData();
+        return clr.Heap;
+    }
+
+    /// <summary>Per-type heap aggregate: count, total size, and one representative live address.</summary>
+    private sealed class TypeAgg { public long Count; public ulong Size; public ulong SampleAddress; }
+
+    /// <summary>Single heap pass aggregating count/size per type and recording the first-seen instance address.</summary>
+    private static Dictionary<string, TypeAgg> BuildHistogram(ClrHeap heap)
+    {
+        var agg = new Dictionary<string, TypeAgg>();
+        foreach (var obj in heap.EnumerateObjects())
+        {
+            if (obj.Type == null) continue;
+            var n = obj.Type.Name ?? "<unknown>";
+            if (!agg.TryGetValue(n, out var a)) { a = new TypeAgg { SampleAddress = obj.Address }; agg[n] = a; }
+            a.Count++;
+            a.Size += obj.Size;
+        }
+        return agg;
+    }
+
+    /// <summary>Find one live instance address for each requested type name (single heap pass).</summary>
+    private static Dictionary<string, ulong> SampleAddressesForTypes(ClrHeap heap, HashSet<string> typeNames)
+    {
+        var found = new Dictionary<string, ulong>();
+        foreach (var obj in heap.EnumerateObjects())
+        {
+            if (obj.Type?.Name == null) continue;
+            if (typeNames.Contains(obj.Type.Name) && !found.ContainsKey(obj.Type.Name))
+            {
+                found[obj.Type.Name] = obj.Address;
+                if (found.Count == typeNames.Count) break;
+            }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Compute retention paths for several target objects in ONE reverse-reachability
+    /// index build (GCRoot accepts multiple targets). Returns target-address ->
+    /// {target, rooted, rootKind, depth, path:[{address,type,field}]} (root -> target),
+    /// only for targets that are actually rooted.
+    /// </summary>
+    private static Dictionary<ulong, object> BuildRetentionPaths(ClrHeap heap, ulong[] targets)
+    {
+        var result = new Dictionary<ulong, object>();
+        if (targets.Length == 0) return result;
+        var set = new HashSet<ulong>(targets);
+        var gcroot = new GCRoot(heap, targets);
+        foreach (var pair in gcroot.EnumerateRootPaths())
+        {
+            var rootKind = pair.Item1.RootKind.ToString();
+            var addrs = new List<ulong>();
+            for (var n = pair.Item2; n != null; n = n.Next) addrs.Add(n.Object);
+            if (addrs.Count == 0) continue;
+            // The target end is whichever end is in our set; normalize to root -> target.
+            ulong tgt;
+            if (set.Contains(addrs[addrs.Count - 1])) tgt = addrs[addrs.Count - 1];
+            else if (set.Contains(addrs[0])) { tgt = addrs[0]; addrs.Reverse(); }
+            else continue;
+            if (result.ContainsKey(tgt)) continue; // first path per target
+
+            var path = new List<object>();
+            for (int i = 0; i < addrs.Count; i++)
+            {
+                string? field = null;
+                if (i > 0)
+                {
+                    var prev = heap.GetObject(addrs[i - 1]);
+                    foreach (var rf in prev.EnumerateReferencesWithFields(false, true))
+                        if (rf.Object.Address == addrs[i]) { field = rf.Field?.Name ?? (rf.IsArrayElement ? "[]" : null); break; }
+                }
+                path.Add(new { address = $"0x{addrs[i]:X}", type = heap.GetObject(addrs[i]).Type?.Name, field });
+            }
+            result[tgt] = new { target = $"0x{tgt:X}", rooted = true, rootKind, depth = path.Count, path = (object)path };
+        }
+        return result;
+    }
+
+    /// <summary>Types too ubiquitous to be a useful auto-retention target (strings, framework arrays).</summary>
+    private static bool LikelyNoise(string typeName)
+        => typeName == "System.String"
+        || (typeName.EndsWith("[]", StringComparison.Ordinal) && typeName.StartsWith("System.", StringComparison.Ordinal));
 
     /// <summary>First field on a type matching any of the candidate names (BCL layouts differ across Framework/Core).</summary>
     private static ClrInstanceField? FirstField(ClrType t, params string[] names)

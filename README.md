@@ -174,6 +174,9 @@ debug_heap_static_field                          # read a type's static field (e
 debug_heap_references / debug_heap_referencing   # outbound refs / who-references-this (1 hop)
 debug_heap_roots                                 # GC roots: handles / stack / finalizer (the anchors)
 debug_heap_retention_path                        # full chain GC root -> ... -> object ("why is this alive")
+debug_heap_leak_report                           # top-N types + auto-retention, one call
+debug_heap_snapshot / debug_heap_snapshot_diff   # histogram now / what grew between two moments
+debug_heap_snapshot_list
 
 # memory
 debug_memory_read / debug_memory_write / debug_memory_read_int / debug_disasm
@@ -386,16 +389,33 @@ Three tools answer "what's keeping memory alive", in increasing depth:
   managed `!gcroot`), each hop labelled with the field that points to the next.
   This is the "why is this still alive?" answer.
 
-Typical leak hunt: `debug_heap_stats` / `debug_heap_find_instances` across a few
-snapshots → spot a type whose instance count keeps climbing →
-`debug_heap_retention_path` on one instance → see exactly what holds it (a
-static cache, an un-removed event handler, a captured closure in a long-lived
-timer). A static-held object shows up rooted via the runtime's `PinnedHandle` on
-the per-domain static-storage `object[]`, with the chain running through it.
-All three are read-only ClrMD walks (no func-eval, no code execution) and work
-against a dump too. `debug_heap_retention_path` is heavyweight — it builds a
-reverse-reachability index over the whole heap, so it can be slow on a large
-process.
+Two higher-level tools wrap that workflow:
+
+- `debug_heap_leak_report` — **one call**: a top-N type histogram (by count or
+  `bySize`) plus an automatic retention path for the top non-noise types. "What's
+  biggest, and why is it alive" in a single shot. Auto-retention skips ubiquitous
+  noise (`System.String`, `System.*[]`).
+- `debug_heap_snapshot` / `debug_heap_snapshot_diff` — growth **over time**: take
+  a snapshot, exercise the app (repeat the suspect operation N times), take
+  another, diff. The diff lists per-type `deltaCount` / `deltaSize` sorted by
+  growth and auto-runs a retention path on a live instance of the top growers.
+  Types that climb across snapshots taken around a repeated operation are the
+  leak. Snapshots are lightweight (type→count/size), kept (last 20) on the agent
+  and cleared on detach; `debug_heap_snapshot_list` shows them.
+
+Typical leak hunt: `debug_heap_snapshot` → repeat the operation → `debug_heap_snapshot`
+→ `debug_heap_snapshot_diff` → the grown type's auto-retention shows exactly what
+holds it (a static cache, an un-removed event handler, a captured closure in a
+long-lived timer). A static-held object shows up rooted via the runtime's
+`PinnedHandle` on the per-domain static-storage `object[]`, with the chain
+running through it.
+
+All of these are read-only ClrMD walks (no func-eval, no code execution) and work
+against a dump too. Each fresh walk flushes ClrMD's cache so it reflects the
+**current** heap (the runtime otherwise serves its attach-time view).
+`debug_heap_retention_path` (and the auto-retention in the two wrappers) is
+heavyweight — it builds a reverse-reachability index over the whole heap, so it
+can be slow on a large process.
 
 ### Source-aware debugging (source ↔ IL)
 

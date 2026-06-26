@@ -485,6 +485,7 @@ public sealed class DebuggerSession : IDisposable
             _clrMdTarget = null;
 
             Breakpoints.Clear();
+            HeapSnapshotStore.Clear();
             ExceptionInterception = null;
             Pid = null;
             DumpPath = null;
