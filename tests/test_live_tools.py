@@ -13,6 +13,7 @@ bootstrap issue is fixed.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -435,6 +436,52 @@ def test_conditional_bp_value_field_enum(live_agent):
         fields = _arg0_object_fields(live_agent)
         kind = next(f["value"] for f in fields if "Kind" in f["name"])
         assert isinstance(kind, dict) and kind.get("name") == "Gadget", f"wrong enum match: {kind}"
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
+def test_tracepoint_log_only_capture(live_agent, mcp):
+    """Log-only tracepoint on Inspect(Widget): capture passive values at each hit
+    and AUTO-CONTINUE (no per-hit pause). Verifies multiple distinct samples
+    accumulate over time (proof the process kept running), the decoded leaves are
+    correct (int / string / enum-with-name), and maxHits caps the buffer. Skips
+    when the running host predates the tool (dist not rebuilt) — the agent side
+    is covered by the standalone probe regardless."""
+    if not any(t.get("name") == "debug_bp_log" for t in mcp.list_tools()):
+        pytest.skip("debug_bp_log not in this MCP host build (rebuild dist via builder.ps1)")
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect",
+        "logExpressions": ["arg0.Value", "arg0.Name", "arg0.Kind"],
+        "logOnly": True, "maxHits": 4})
+    bp_id = bp["id"]
+    assert bp["kind"] == "tracepoint"
+    assert bp["logOnly"] is True and bp["maxHits"] == 4
+    try:
+        # Inspect runs every ~500ms; wait for the cap to fill. Auto-continue
+        # means we never call debug_go and the process never stays paused.
+        log = None
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            time.sleep(1.0)
+            log = live_agent.call_json("debug_bp_log", {"id": bp_id})
+            if log["capped"]:
+                break
+        assert log is not None
+        assert log["captured"] >= 2, f"auto-continue should accumulate multiple samples: {log}"
+        assert log["capped"] is True, f"maxHits=4 should cap the buffer: {log}"
+        assert len(log["samples"]) == 4, log
+        # hitCount keeps rising past the cap — post-cap hits are cheap (no capture).
+        assert log["hitCount"] >= log["captured"], log
+        s0 = log["samples"][0]["values"]
+        assert s0["arg0.Value"]["kind"] == "int"
+        assert s0["arg0.Name"]["kind"] == "string"
+        assert s0["arg0.Kind"]["kind"] == "enum" and "name" in s0["arg0.Kind"]
+        # clear=true returns the snapshot then empties the buffer (bp stays armed).
+        cleared = live_agent.call_json("debug_bp_log", {"id": bp_id, "clear": True})
+        assert len(cleared["samples"]) >= 1
     finally:
         live_agent.call_json("debug_bp_delete", {"id": bp_id})
         live_agent.call_json("debug_go")

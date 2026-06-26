@@ -13,31 +13,33 @@ public static class BreakpointHandlers
     public static void Register(Dispatcher d)
     {
         d.Register("bp.set_il",
-            "[DEBUG] Set an IL-offset breakpoint. Params: {modulePath:string, token:uint, offset?:uint=0, condition?:string}. modulePath matches DnModule.Name suffix (case-insensitive). condition (op: ==/!=/>=/<=/>/<) is one of: `count <op> N` — pause on the Nth hit onward (e.g. \"count >= 5\"); or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame at the hit. Literals: integer (dec or 0x-hex), true/false, null, or a quoted string. Guid/DateTime fields compare by text and enums by member name, so e.g. \"arg0.UId == '0c81...'\", \"local1 > 100\", \"arg1.Name != null\".",
+            "[DEBUG] Set an IL-offset breakpoint. Params: {modulePath:string, token:uint, offset?:uint=0, condition?:string, logExpressions?:string[], logOnly?:bool=true, maxHits?:int=200}. modulePath matches DnModule.Name suffix (case-insensitive). condition (op: ==/!=/>=/<=/>/<) is one of: `count <op> N` — pause on the Nth hit onward (e.g. \"count >= 5\"); or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame at the hit. Literals: integer (dec or 0x-hex), true/false, null, or a quoted string. Guid/DateTime fields compare by text and enums by member name, so e.g. \"arg0.UId == '0c81...'\", \"local1 > 100\", \"arg1.Name != null\". TRACEPOINT/LOGPOINT: pass logExpressions (e.g. [\"arg0.Value\",\"local1\"]) to snapshot those passive values at each hit into a buffer fetched via bp.log; logOnly=true (default) auto-continues WITHOUT pausing (combine with condition to capture only matching hits); maxHits caps the buffer (default 200) then capture stops. NOTE: every hit still physically stops the whole process briefly (ICorDebug) — safe on cold paths only; no func-eval, so only primitives/strings/Guid/DateTime/enum/field-paths.",
             p => Program.Session.OnDbg(() =>
             {
                 var modulePath = Dispatcher.Req<string>(p, "modulePath");
                 var token = Dispatcher.Req<uint>(p, "token");
                 var offset = Dispatcher.Opt<uint>(p, "offset", 0);
                 var condition = Dispatcher.Opt<string?>(p, "condition", null);
+                var (exprs, continueAfter, max) = ReadTraceParams(p);
 
                 var mod = FindModule(modulePath)
                     ?? throw new ArgumentException($"module not found: {modulePath}");
 
                 var entryRef = new BreakpointEntryRef();
-                var cond = BuildCondition(condition, entryRef);
+                var cond = BuildCallback(condition, exprs, continueAfter, max, entryRef);
                 var bp = Program.Session.DnDebugger.CreateBreakpoint(mod.DnModuleId, token, offset, cond);
                 var entry = Program.Session.Breakpoints.Add(
-                    "il",
+                    exprs != null ? "tracepoint" : "il",
                     $"IL bp {Path.GetFileName(mod.Name)}!0x{token:X8}+{offset}",
                     bp);
                 entry.Condition = condition;
+                PrimeTrace(entry, exprs, continueAfter, max);
                 entryRef.Entry = entry;
                 return Describe(entry);
             }));
 
         d.Register("bp.set_by_name",
-            "[DEBUG] Set a breakpoint at IL=0 of a method identified by type and method name. Params: {modulePath:string, typeFullName:string, methodName:string, overloadIndex?:int=0, condition?:string}. condition (op: ==/!=/>=/<=/>/<) is one of: `count <op> N` — pause on the Nth hit onward (e.g. \"count >= 5\"); or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame (arg0 is the receiver 'this' on instance methods). Literals: integer (dec or 0x-hex), true/false, null, or quoted string. Guid/DateTime fields compare by text, enums by member name — e.g. \"arg0.Id == '0c81...'\", \"arg1 >= 10\", \"arg2.Name == 'Contact'\".",
+            "[DEBUG] Set a breakpoint at IL=0 of a method identified by type and method name. Params: {modulePath:string, typeFullName:string, methodName:string, overloadIndex?:int=0, condition?:string, logExpressions?:string[], logOnly?:bool=true, maxHits?:int=200}. condition (op: ==/!=/>=/<=/>/<) is one of: `count <op> N` — pause on the Nth hit onward (e.g. \"count >= 5\"); or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame (arg0 is the receiver 'this' on instance methods). Literals: integer (dec or 0x-hex), true/false, null, or quoted string. Guid/DateTime fields compare by text, enums by member name — e.g. \"arg0.Id == '0c81...'\", \"arg1 >= 10\", \"arg2.Name == 'Contact'\". TRACEPOINT/LOGPOINT: pass logExpressions (e.g. [\"arg0.Name\",\"arg1\"]) to snapshot those passive values at each hit into a buffer fetched via bp.log; logOnly=true (default) auto-continues WITHOUT pausing (combine with condition to capture only matching hits); maxHits caps the buffer (default 200) then capture stops. NOTE: every hit still physically stops the whole process briefly (ICorDebug) — safe on cold paths only; no func-eval, so only primitives/strings/Guid/DateTime/enum/field-paths.",
             p => Program.Session.OnDbg(() =>
             {
                 var modulePath = Dispatcher.Req<string>(p, "modulePath");
@@ -45,6 +47,7 @@ public static class BreakpointHandlers
                 var methodName = Dispatcher.Req<string>(p, "methodName");
                 var overloadIndex = Dispatcher.Opt<int>(p, "overloadIndex", 0);
                 var condition = Dispatcher.Opt<string?>(p, "condition", null);
+                var (exprs, continueAfter, max) = ReadTraceParams(p);
 
                 var mod = FindModule(modulePath)
                     ?? throw new ArgumentException($"module not found: {modulePath}");
@@ -57,16 +60,52 @@ public static class BreakpointHandlers
                 if (methodToken == 0) throw new ArgumentException($"method not found: {typeFullName}::{methodName} (overload {overloadIndex})");
 
                 var entryRef = new BreakpointEntryRef();
-                var cond = BuildCondition(condition, entryRef);
+                var cond = BuildCallback(condition, exprs, continueAfter, max, entryRef);
                 var bp = Program.Session.DnDebugger.CreateBreakpoint(mod.DnModuleId, methodToken, 0, cond);
                 var entry = Program.Session.Breakpoints.Add(
-                    "by_name",
+                    exprs != null ? "tracepoint" : "by_name",
                     $"{typeFullName}::{methodName} [token=0x{methodToken:X8}]",
                     bp);
                 entry.Condition = condition;
+                PrimeTrace(entry, exprs, continueAfter, max);
                 entryRef.Entry = entry;
                 return Describe(entry);
             }));
+
+        d.Register("bp.log",
+            "[DEBUG] Fetch the values captured by a tracepoint/logpoint (a bp.set_* set with logExpressions). Params: {id:int, clear?:bool=false, offset?:int=0, max?:int=200}. Returns {id, description, hitCount, captured, capped, maxHits, logExpressions, samples:[{seq, hit, values:{expr->{kind,value,...}}}]}. capped=true means maxHits was reached and capture stopped. clear=true empties the buffer after reading (the breakpoint stays armed). Use bp.delete to remove the tracepoint entirely (stops the per-hit process stop).",
+            p =>
+            {
+                var id = Dispatcher.Req<int>(p, "id");
+                var clear = Dispatcher.Opt<bool>(p, "clear", false);
+                var offset = Dispatcher.Opt<int>(p, "offset", 0);
+                var max = Dispatcher.Opt<int>(p, "max", 200);
+                if (!Program.Session.Breakpoints.TryGet(id, out var entry))
+                    throw new ArgumentException($"bp id {id} not found");
+                if (entry.Captures == null)
+                    throw new ArgumentException($"bp id {id} is not a tracepoint (set logExpressions on bp.set_* to capture values)");
+
+                List<object> snapshot;
+                bool capped;
+                lock (entry.Captures)
+                {
+                    snapshot = entry.Captures.Skip(Math.Max(0, offset)).Take(Math.Max(0, max)).ToList();
+                    capped = entry.Capped;
+                    if (clear) { entry.Captures.Clear(); entry.Capped = false; }
+                }
+                return new
+                {
+                    id = entry.Id,
+                    description = entry.Description,
+                    hitCount = entry.HitCount,
+                    captured = entry.CaptureSeq,
+                    capped,
+                    maxHits = entry.MaxCaptures,
+                    logExpressions = entry.LogExpressions,
+                    returned = snapshot.Count,
+                    samples = snapshot,
+                };
+            });
 
         d.Register("bp.set_native",
             "[DEBUG] Set a native-code breakpoint by absolute address. Params: {address:ulong, modulePath?:string, token?:uint}. If (modulePath,token) present, bp is scoped to that jitted function; else breakpoints the raw address via native code handle.",
@@ -136,6 +175,12 @@ public static class BreakpointHandlers
         enabled = e.Enabled,
         condition = e.Condition,
         hitCount = e.HitCount,
+        // Tracepoint fields are null/0 for ordinary breakpoints.
+        logExpressions = e.LogExpressions,
+        logOnly = e.LogExpressions == null ? (bool?)null : e.ContinueAfter,
+        maxHits = e.LogExpressions == null ? (int?)null : e.MaxCaptures,
+        captured = e.LogExpressions == null ? (int?)null : e.CaptureSeq,
+        capped = e.LogExpressions == null ? (bool?)null : e.Capped,
     };
 
     /// <summary>
@@ -160,15 +205,109 @@ public static class BreakpointHandlers
     /// regardless of how many of those triggered an actual pause.
     /// </summary>
     private static Func<dndbg.Engine.ILCodeBreakpointConditionContext, bool>? BuildCondition(string? condition, BreakpointEntryRef entryRef)
+        => BuildCallback(condition, null, false, 0, entryRef);
+
+    /// <summary>
+    /// Build the breakpoint-hit callback, fusing an optional condition gate with
+    /// optional tracepoint capture. Returns null only when there is neither a
+    /// condition nor any capture (a plain unconditional BP needs no callback).
+    ///
+    /// Semantics per hit (callback runs on the debugger STA thread, process
+    /// physically stopped):
+    ///   1. HitCount++ (true physical-hit count).
+    ///   2. gate = condition predicate, or true if none.
+    ///   3. if gate AND capturing AND under the cap: snapshot the passive values
+    ///      into the entry's ring buffer. Once the cap is reached, capturing
+    ///      stops — post-cap hits skip all ClrMD work.
+    ///   4. Return value decides pause-vs-continue: a log-only tracepoint
+    ///      (ContinueAfter) always returns false so dndbg auto-continues without
+    ///      a client-visible pause; otherwise return the gate (pause iff true).
+    ///
+    /// The callback NEVER calls Continue() itself — it signals "continue" by
+    /// returning false; dndbg's dispatch loop performs the actual resume. Driving
+    /// Continue() (or func-eval) from inside this callback is unsafe.
+    /// </summary>
+    private static Func<dndbg.Engine.ILCodeBreakpointConditionContext, bool>? BuildCallback(
+        string? condition, string[]? logExpressions, bool continueAfter, int maxCaptures, BreakpointEntryRef entryRef)
     {
-        if (string.IsNullOrWhiteSpace(condition)) return null;
-        var predicate = ConditionEvaluator.Compile(condition!);
+        var predicate = string.IsNullOrWhiteSpace(condition) ? null : ConditionEvaluator.Compile(condition!);
+        var readers = (logExpressions == null || logExpressions.Length == 0)
+            ? null
+            : logExpressions.Select(e => (expr: e, read: ConditionEvaluator.CompileCapture(e))).ToArray();
+
+        if (predicate == null && readers == null) return null;
+
         return ctx =>
         {
             var entry = entryRef.Entry;
             int n = entry == null ? 1 : System.Threading.Interlocked.Increment(ref entry.HitCount);
-            return predicate(n, ctx);
+
+            bool gate;
+            try { gate = predicate == null || predicate(n, ctx); }
+            catch { gate = true; } // fail-open: a broken gate pauses/captures rather than silently dropping
+
+            if (gate && readers != null && entry != null)
+                CaptureSample(entry, n, readers, ctx);
+
+            // Log-only tracepoint never pauses; a plain/conditional BP pauses on gate.
+            return continueAfter ? false : gate;
         };
+    }
+
+    /// <summary>Snapshot the configured passive expressions into the entry's capped ring buffer.</summary>
+    private static void CaptureSample(Services.BreakpointEntry entry, int hit,
+        (string expr, Func<dndbg.Engine.ILCodeBreakpointConditionContext, object> read)[] readers,
+        dndbg.Engine.ILCodeBreakpointConditionContext ctx)
+    {
+        var buf = entry.Captures;
+        if (buf == null) return;
+        // Cheap cap check first so post-cap hits skip all ClrMD reads.
+        lock (buf)
+        {
+            if (buf.Count >= entry.MaxCaptures) { entry.Capped = true; return; }
+        }
+        var values = new Dictionary<string, object>();
+        foreach (var r in readers)
+        {
+            try { values[r.expr] = r.read(ctx); }
+            catch (Exception ex) { values[r.expr] = new { kind = "error", error = ex.Message }; }
+        }
+        var sample = new { seq = ++entry.CaptureSeq, hit, values };
+        lock (buf)
+        {
+            if (buf.Count < entry.MaxCaptures) buf.Add(sample);
+            else entry.Capped = true;
+        }
+    }
+
+    private const int DefaultMaxCaptures = 200;
+
+    /// <summary>
+    /// Read tracepoint-mode params from a request and, when logExpressions are
+    /// present, prime the entry's capture buffer. Returns the (logExpressions,
+    /// continueAfter, maxCaptures) triple to feed <see cref="BuildCallback"/>.
+    /// </summary>
+    private static (string[]? exprs, bool continueAfter, int max) ReadTraceParams(JObject? p)
+    {
+        var arr = p? ["logExpressions"] as JArray;
+        var exprs = arr?.Select(t => t.Value<string>() ?? "").Where(s => s.Length > 0).ToArray();
+        if (exprs != null && exprs.Length == 0) exprs = null;
+        // log-only (auto-continue) defaults to true when capturing — that's the
+        // tracepoint use case; pass logOnly:false to ALSO pause on each capture.
+        var continueAfter = exprs == null ? false : Dispatcher.Opt<bool>(p, "logOnly", true);
+        var max = Dispatcher.Opt<int>(p, "maxHits", DefaultMaxCaptures);
+        if (max <= 0) max = DefaultMaxCaptures;
+        return (exprs, continueAfter, max);
+    }
+
+    /// <summary>Attach tracepoint capture state to a freshly-created entry (no-op when not a tracepoint).</summary>
+    private static void PrimeTrace(Services.BreakpointEntry entry, string[]? exprs, bool continueAfter, int max)
+    {
+        if (exprs == null) return;
+        entry.LogExpressions = exprs;
+        entry.ContinueAfter = continueAfter;
+        entry.MaxCaptures = max;
+        entry.Captures = new List<object>();
     }
 
     /// <summary>

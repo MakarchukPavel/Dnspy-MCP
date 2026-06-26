@@ -67,6 +67,58 @@ public static class ConditionEvaluator
         };
     }
 
+    /// <summary>
+    /// Parse a capture expression (<c>arg&lt;n&gt;[.field…]</c> or
+    /// <c>local&lt;n&gt;[.field…]</c>) into a reader that, given the paused-frame
+    /// context, returns a JSON-friendly decoded value. Used by tracepoints to
+    /// snapshot a value at each hit. Same passive read path as conditions (no
+    /// func-eval): primitives, strings, bool, enum (with member name),
+    /// Guid/DateTime/etc. by text, null, and an opaque marker for object refs.
+    /// An unreadable slot (optimized away / out of scope) yields
+    /// <c>{kind:"unavailable"}</c> rather than throwing, so one bad expression
+    /// never aborts the whole capture.
+    /// </summary>
+    public static Func<ILCodeBreakpointConditionContext, object> CompileCapture(string expr)
+    {
+        if (string.IsNullOrWhiteSpace(expr))
+            throw new ArgumentException("capture expression must be non-empty");
+        var m = SlotRe.Match(expr.Trim());
+        if (!m.Success)
+            throw new ArgumentException(
+                $"unsupported capture expression '{expr}': must be 'arg<n>' or 'local<n>' (optionally with a .field path)");
+
+        bool isArg = m.Groups[1].Value.Equals("arg", StringComparison.OrdinalIgnoreCase);
+        uint idx = uint.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+        string[] path = m.Groups[3].Value.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries);
+
+        return ctx =>
+        {
+            try
+            {
+                var frame = ActiveIlFrame(ctx.E?.CorThread);
+                if (frame == null) return new { kind = "unavailable", reason = "no managed frame" };
+                var v = isArg ? frame.GetILArgument(idx, out _) : frame.GetILLocal(idx, out _);
+                if (v == null) return new { kind = "unavailable", reason = "optimized away / out of scope" };
+                var leaf = path.Length == 0 ? ReadSlotLeaf(v) : ReadPathLeaf(v, path);
+                return CmpToJson(leaf);
+            }
+            catch (Exception ex) { return new { kind = "error", error = ex.Message }; }
+        };
+    }
+
+    /// <summary>Project a comparison leaf into a JSON-friendly capture value.</summary>
+    private static object CmpToJson(Cmp c) => c.Kind switch
+    {
+        CmpKind.Null => new { kind = "null" },
+        CmpKind.Bool => new { kind = "bool", value = (object)c.Bool },
+        CmpKind.Num => c.Integral ? new { kind = "int", value = (object)c.Long }
+                                   : new { kind = "float", value = (object)c.Num },
+        CmpKind.Str => new { kind = "string", value = (object?)c.Str },
+        CmpKind.Enum => new { kind = "enum", value = (object)c.Long, name = (object?)c.Str },
+        CmpKind.Obj => new { kind = "object" },
+        _ => new { kind = "unknown" },
+    };
+
     // ---- evaluation ---------------------------------------------------------
 
     private static bool EvalSlot(ILCodeBreakpointConditionContext ctx, bool isArg, uint idx,

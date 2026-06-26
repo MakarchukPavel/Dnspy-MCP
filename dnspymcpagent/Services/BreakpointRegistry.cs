@@ -18,6 +18,20 @@ public sealed class BreakpointEntry
     // instruction was hit.
     public string? Condition { get; set; }
     public int HitCount;  // public field so the condition callback can Interlocked.Increment it
+
+    // Tracepoint / logpoint state (D5). When LogExpressions is set, the hit
+    // callback snapshots those passive values into Captures and, when
+    // ContinueAfter is true, never pauses (log-only). MaxCaptures caps the
+    // buffer: once reached, capturing stops (post-cap hits skip all ClrMD work)
+    // so the per-hit cost drops to the bare stop+continue. Captures is guarded
+    // by locking on the list itself (callback runs on the debugger STA thread;
+    // bp.log reads from the dispatcher thread).
+    public string[]? LogExpressions;
+    public bool ContinueAfter;          // log-only: capture then auto-continue (no pause)
+    public int MaxCaptures;             // hard cap on stored samples
+    public List<object>? Captures;      // ring of {seq, hit, values:{expr->value}}
+    public int CaptureSeq;              // monotonic sample counter (total attempts, incl. dropped after cap)
+    public bool Capped;                 // set once MaxCaptures was reached
 }
 
 public sealed class BreakpointRegistry

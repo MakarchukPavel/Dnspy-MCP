@@ -154,6 +154,7 @@ debug_list_modules / debug_find_type / debug_list_type_methods
 # breakpoints (optional conditions: `count <op> N` or value gate `arg/local[.field] <op> literal`)
 debug_bp_set_il / debug_bp_set_by_name / debug_bp_set_native
 debug_bp_list / debug_bp_delete / debug_bp_enable / debug_bp_disable
+debug_bp_log                                     # fetch values captured by a tracepoint/logpoint
 
 # exception interception (break on a thrown managed exception)
 debug_exception_break_set    # mode: all | unhandled | by_type  (+ typeName, firstChance, excludeTypes)
@@ -294,6 +295,55 @@ silently swallowing every hit.
 The agent records every callback invocation (`hitCount` in `bp.list`)
 regardless of whether the predicate let the pause through, so the
 counter always reflects the true number of physical hits.
+
+---
+
+## Tracepoints / logpoints (D5)
+
+A *tracepoint* is a breakpoint that **snapshots values and resumes** instead of
+pausing — non-interactive instrumentation. Pass `logExpressions` to
+`debug_bp_set_by_name` / `debug_bp_set_il`:
+
+```
+debug_bp_set_by_name(
+    modulePath="Terrasoft.Core", typeFullName="...", methodName="...",
+    logExpressions=["arg0.Id", "arg1.Name", "local2"],   # passive reads, same language as conditions
+    logOnly=true,        # capture then auto-continue (no pause). default true when logExpressions set
+    maxHits=200)         # hard cap: once reached, capturing stops
+# ... let it run ...
+debug_bp_log(id=<bp id>)         # -> {hitCount, captured, capped, samples:[{seq, hit, values:{expr->{kind,value}}}]}
+debug_bp_log(id=<bp id>, clear=true)   # drain the buffer (bp stays armed)
+debug_bp_delete(id=<bp id>)            # stop entirely
+```
+
+A `condition` combines with logging — capture only matching hits, e.g.
+`condition="arg0.Kind == 'Gadget'"` + `logExpressions=[...]`. Values are decoded
+the same way conditions read them: `{kind:int|float|string|bool|enum|null|object}`
+(enums carry their member `name`; Guid/DateTime/decimal as text). `kind:unavailable`
+means the slot was optimized away / out of scope.
+
+**How it works, and the cost — read before using on production.** This is built
+on ICorDebug, which has **no zero-stop breakpoint** for managed code. Every hit
+**physically stops the whole process** (all managed threads), the agent reads the
+values out-of-process, then the engine auto-continues. `logOnly` means *no
+human-visible pause* — **not** *no stop*. So:
+
+- **Cold paths only.** On a method hit a few times the per-hit stop is
+  imperceptible. On a **hot path** (thousands of hits/sec) the repeated
+  whole-process stop + cross-process round-trip seriously degrades or
+  near-freezes the target. For hot-path telemetry use ETW / EventPipe /
+  `dotnet-trace`, not a debugger.
+- A `condition` reduces *pauses/captures*, **not** the per-hit stop cost — the
+  breakpoint still fires and stops the world on every hit (a value gate makes
+  each hit *more* expensive). To bound cost, keep `maxHits` low (capture then
+  capture stops) and `debug_bp_delete` the tracepoint when done.
+- **No func-eval.** Only passive reads are possible inside the hit callback
+  (args/locals/fields/struct decode) — calling a property getter or method there
+  can deadlock/corrupt a live w3wp, so it is not supported. Use a paused
+  `debug_eval_call` for that.
+
+Pair with `reverse_il_at_source_line` to place an IL-offset tracepoint at a
+specific decompiled source line.
 
 ---
 
