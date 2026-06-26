@@ -330,6 +330,11 @@ public static class LiveDebugTools
     public static object HeapReadArray(AgentRegistry reg, string address, int offset = 0, int count = 128, string? agent = null)
         => reg.Get(agent).Result("heap.read_array", new { address = Numbers.ParseUInt64(address, "address"), offset, count })!;
 
+    [McpServerTool(Name = "debug_heap_read_collection")]
+    [Description("[DEBUG] Read a generic List<T> or Dictionary<K,V> at a managed address as decoded elements / {key,value} pairs — instead of manually walking _items / entries / buckets. Primitives/enums/strings/Guid/DateTime/structs decoded inline; references as {kind:object,type,address}; Dictionary skips removed slots. Paged. Params: address (ulong as string — decimal or hex), offset=0, count=128. Other collection types: use debug_heap_read_object + debug_heap_read_array.")]
+    public static object HeapReadCollection(AgentRegistry reg, string address, int offset = 0, int count = 128, string? agent = null)
+        => reg.Get(agent).Result("heap.read_collection", new { address = Numbers.ParseUInt64(address, "address"), offset, count })!;
+
     [McpServerTool(Name = "debug_heap_stats")]
     [Description("[DEBUG] Top-N types on the managed heap by total size (paginated). Params: top=25 (agent-side), offset=0, max=200 (MCP envelope cap).")]
     public static object HeapStats(AgentRegistry reg, int top = 25, int offset = 0, int max = 200, string? agent = null)

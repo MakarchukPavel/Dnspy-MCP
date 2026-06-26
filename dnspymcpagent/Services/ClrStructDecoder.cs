@@ -133,6 +133,33 @@ public static class ClrStructDecoder
 
     // ---- generic struct expansion -------------------------------------------
 
+    /// <summary>
+    /// Decode a single field/member of a value type (struct) — reference -&gt;
+    /// {kind:object}, string, primitive(+enum), nested struct one level. Public
+    /// so collection readers can decode e.g. a Dictionary Entry's key/value.
+    /// </summary>
+    public static object? DecodeValueTypeMember(ClrValueType vt, ClrInstanceField f, int depth = 0)
+    {
+        try
+        {
+            if (f.IsObjectReference)
+            {
+                var o = vt.ReadObjectField(f.Name);
+                if (o.IsNull) return null;
+                if (o.Type?.IsString == true) return new { kind = "string", value = o.AsString(int.MaxValue) };
+                return new { kind = "object", type = o.Type?.Name, address = $"0x{o.Address:X}" };
+            }
+            if (f.ElementType == ClrElementType.String)
+                return vt.ReadStringField(f.Name);
+            if (IsPrimitive(f.ElementType))
+                return DecorateEnum(f.Type, ReadPrimitiveField(vt, f));
+            if (depth < 1 && f.Type != null)
+                return DecodeByAddress(vt.ReadValueTypeField(f.Name).Address, f.Type.Name, f.Type, depth + 1);
+            return $"<{f.ElementType}>";
+        }
+        catch (Exception ex) { return $"<read error: {ex.Message}>"; }
+    }
+
     private static object ExpandStruct(ClrType t, ulong address, int depth)
     {
         var vt = ClrValueType.FromAddress(address, t);
@@ -141,33 +168,7 @@ public static class ClrStructDecoder
         foreach (var f in t.Fields)
         {
             if (n >= MaxStructFields) break;
-            object? val;
-            try
-            {
-                if (f.IsObjectReference)
-                {
-                    var o = vt.ReadObjectField(f.Name);
-                    val = o.IsNull ? null : new { kind = "object", type = o.Type?.Name, address = $"0x{o.Address:X}" };
-                }
-                else if (f.ElementType == ClrElementType.String)
-                {
-                    val = vt.ReadStringField(f.Name);
-                }
-                else if (IsPrimitive(f.ElementType))
-                {
-                    val = DecorateEnum(f.Type, ReadPrimitiveField(vt, f));
-                }
-                else if (depth < 1 && f.Type != null)
-                {
-                    // One level of nesting (e.g. DateTimeOffset._dateTime).
-                    val = DecodeByAddress(vt.ReadValueTypeField(f.Name).Address, f.Type.Name, f.Type, depth + 1);
-                }
-                else
-                {
-                    val = $"<{f.ElementType}>";
-                }
-            }
-            catch (Exception ex) { val = $"<read error: {ex.Message}>"; }
+            object? val = DecodeValueTypeMember(vt, f, depth);
             fields.Add(new { name = f.Name, typeName = f.Type?.Name, value = val });
             n++;
         }

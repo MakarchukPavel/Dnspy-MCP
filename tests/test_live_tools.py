@@ -166,6 +166,28 @@ def test_heap_static_field(live_agent, mcp):
     assert not live_agent.call("debug_heap_static_field", {"typeName": T, "fieldName": "Nope"})["ok"]
 
 
+def test_heap_read_collection(live_agent, mcp):
+    """debug_heap_read_collection decodes a List<T> as elements and a
+    Dictionary<K,V> as {key,value} pairs. Program.AliveWidgets (List<Widget>)
+    and Program.Counters (Dictionary<string,int>). Skips if host predates the tool."""
+    if not any(t.get("name") == "debug_heap_read_collection" for t in mcp.list_tools()):
+        pytest.skip("debug_heap_read_collection not in this MCP host build (rebuild dist via builder.ps1)")
+    T = "DnSpyMcp.TestTarget.Program"
+
+    lst = live_agent.call_json("debug_heap_static_field", {"typeName": T, "fieldName": "AliveWidgets"})["value"]
+    addr = int(lst["address"], 16)
+    coll = live_agent.call_json("debug_heap_read_collection", {"address": str(addr), "count": 3})
+    assert coll["kind"] == "list" and coll["count"] == 10 and coll["returned"] == 3 and coll["truncated"], coll
+    assert coll["items"][0]["value"]["type"].endswith(".Widget"), coll
+
+    dic = live_agent.call_json("debug_heap_static_field", {"typeName": T, "fieldName": "Counters"})["value"]
+    daddr = int(dic["address"], 16)
+    d = live_agent.call_json("debug_heap_read_collection", {"address": str(daddr)})
+    assert d["kind"] == "dictionary" and d["count"] == 3, d
+    kv = {e["key"]["value"]: e["value"] for e in d["entries"]}
+    assert kv == {"alpha": 1, "beta": 2, "gamma": 3}, d
+
+
 def test_heap_read_string(live_agent):
     strs = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "System.String", "max": 1}))
     if not strs:

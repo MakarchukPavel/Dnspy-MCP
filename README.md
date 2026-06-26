@@ -162,6 +162,7 @@ debug_exception_ignore_clear
 # heap (ClrMD)
 debug_heap_find_instances / debug_heap_read_object
 debug_heap_read_array                            # elements of a List<T> backing / T[]
+debug_heap_read_collection                       # List<T> -> elements, Dictionary<K,V> -> {key,value}
 debug_heap_read_string / debug_heap_stats
 debug_heap_static_field                          # read a type's static field (entry into singletons)
 

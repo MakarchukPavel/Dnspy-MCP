@@ -96,63 +96,7 @@ public static class HeapHandlers
                 var obj = heap.GetObject(address);
                 if (obj.Type == null) throw new ArgumentException($"no type at 0x{address:X}");
                 if (!obj.Type.IsArray) throw new ArgumentException($"object at 0x{address:X} is not an array (type {obj.Type.Name})");
-                var arr = obj.AsArray();
-                int length = arr.Length;
-                var comp = obj.Type.ComponentType;
-                var et = comp?.ElementType ?? ClrElementType.Unknown;
-                bool isRef = et == ClrElementType.Class || et == ClrElementType.Object
-                          || et == ClrElementType.Array || et == ClrElementType.SZArray;
-                int end = count == 0 ? length : Math.Min(length, offset + count);
-                var items = new List<object>();
-                for (int i = offset; i < end; i++)
-                {
-                    object? val;
-                    try
-                    {
-                        if (et == ClrElementType.String)
-                        {
-                            var e = arr.GetObjectValue(i);
-                            val = e.IsNull ? null : e.AsString(int.MaxValue);
-                        }
-                        else if (isRef)
-                        {
-                            var e = arr.GetObjectValue(i);
-                            val = e.IsNull ? (object?)null : new { kind = "object", type = e.Type?.Name, address = $"0x{e.Address:X}" };
-                        }
-                        else
-                        {
-                            switch (et)
-                            {
-                                case ClrElementType.Boolean: val = arr.GetValue<bool>(i); break;
-                                case ClrElementType.Int8:     val = arr.GetValue<sbyte>(i); break;
-                                case ClrElementType.UInt8:    val = arr.GetValue<byte>(i); break;
-                                case ClrElementType.Int16:    val = arr.GetValue<short>(i); break;
-                                case ClrElementType.UInt16:   val = arr.GetValue<ushort>(i); break;
-                                case ClrElementType.Char:     val = (int)arr.GetValue<char>(i); break;
-                                case ClrElementType.Int32:    val = arr.GetValue<int>(i); break;
-                                case ClrElementType.UInt32:   val = arr.GetValue<uint>(i); break;
-                                case ClrElementType.Int64:    val = arr.GetValue<long>(i); break;
-                                case ClrElementType.UInt64:   val = arr.GetValue<ulong>(i); break;
-                                case ClrElementType.Float:    val = arr.GetValue<float>(i); break;
-                                case ClrElementType.Double:   val = arr.GetValue<double>(i); break;
-                                case ClrElementType.NativeInt: val = arr.GetValue<long>(i); break;
-                                case ClrElementType.Pointer:   val = arr.GetValue<long>(i); break;
-                                default:
-                                    // Struct / value-type elements (incl. enums): decode in place from the
-                                    // element address instead of emitting "<Struct>".
-                                    if (comp != null && (et == ClrElementType.Struct || comp.IsValueType))
-                                    {
-                                        var elemAddr = obj.Type.GetArrayElementAddress(address, i);
-                                        val = ClrStructDecoder.DecodeByAddress(elemAddr, comp.Name, comp);
-                                    }
-                                    else val = $"<{et}>";
-                                    break;
-                            }
-                        }
-                    }
-                    catch (Exception ex) { val = $"<read error: {ex.Message}>"; }
-                    items.Add(new { index = i, value = val });
-                }
+                var (items, length, et, end) = ReadArrayItems(obj, offset, count);
                 return new
                 {
                     address = (long)address,
@@ -164,6 +108,95 @@ public static class HeapHandlers
                     truncated = end < length,
                     items,
                 };
+            });
+
+        d.Register("heap.read_collection",
+            "[DEBUG] Read the contents of a generic List<T> or Dictionary<K,V> at a managed address — decoded as elements / {key,value} pairs, instead of manually walking _items / entries. Primitives/enums/strings/Guid/DateTime/structs decoded inline; references as {kind:object,type,address}; Dictionary skips removed slots. Paged. Params: {address:ulong, offset?:int=0, count?:int=128}. Other collection types: use heap.read_object + heap.read_array.",
+            p =>
+            {
+                var address = Dispatcher.Req<ulong>(p, "address");
+                var offset = Dispatcher.Opt<int>(p, "offset", 0);
+                var count = Dispatcher.Opt<int>(p, "count", 128);
+                if (offset < 0) offset = 0;
+                if (count < 0) count = 0;
+                var heap = Program.Session.ClrRuntime.Heap;
+                var obj = heap.GetObject(address);
+                if (obj.Type == null) throw new ArgumentException($"no type at 0x{address:X}");
+                var name = obj.Type.Name ?? "";
+
+                if (name.StartsWith("System.Collections.Generic.List<", StringComparison.Ordinal))
+                {
+                    var itemsF = FirstField(obj.Type, "_items", "items");
+                    var sizeF = FirstField(obj.Type, "_size", "size");
+                    if (itemsF == null || sizeF == null) throw new InvalidOperationException($"unrecognized List<T> layout on {name}");
+                    int size = obj.ReadField<int>(sizeF.Name);
+                    var arrObj = obj.ReadObjectField(itemsF.Name);
+                    if (arrObj.IsNull || arrObj.Type == null)
+                        return new { address = (long)address, kind = "list", type = name, count = size, offset, returned = 0, truncated = false, items = new List<object>() };
+                    var (items, length, et, end) = ReadArrayItems(arrObj, offset, count, logicalLength: size);
+                    return new
+                    {
+                        address = (long)address,
+                        kind = "list",
+                        type = name,
+                        elementType = et.ToString(),
+                        count = size,
+                        offset,
+                        returned = items.Count,
+                        truncated = end < size,
+                        items,
+                    };
+                }
+
+                if (name.StartsWith("System.Collections.Generic.Dictionary<", StringComparison.Ordinal))
+                {
+                    var entriesF = FirstField(obj.Type, "entries", "_entries");
+                    var countF = FirstField(obj.Type, "count", "_count");
+                    if (entriesF == null || countF == null) throw new InvalidOperationException($"unrecognized Dictionary<K,V> layout on {name}");
+                    int hwm = obj.ReadField<int>(countF.Name); // high-water mark of used entry slots
+                    var freeF = FirstField(obj.Type, "freeCount", "_freeCount");
+                    int freeCount = freeF != null ? obj.ReadField<int>(freeF.Name) : 0;
+                    int liveCount = hwm - freeCount;
+
+                    var entriesObj = obj.ReadObjectField(entriesF.Name);
+                    var entries = new List<object>();
+                    bool truncated = false;
+                    if (!entriesObj.IsNull && entriesObj.Type?.ComponentType != null)
+                    {
+                        var entryType = entriesObj.Type.ComponentType;
+                        var hashF = FirstField(entryType, "hashCode", "_hashCode");
+                        var keyF = FirstField(entryType, "key", "_key") ?? throw new InvalidOperationException("Dictionary Entry has no 'key' field");
+                        var valF = FirstField(entryType, "value", "_value") ?? throw new InvalidOperationException("Dictionary Entry has no 'value' field");
+                        int seen = 0, max = count == 0 ? int.MaxValue : count;
+                        for (int i = 0; i < hwm; i++)
+                        {
+                            var elemAddr = entriesObj.Type.GetArrayElementAddress(entriesObj.Address, i);
+                            var entryVt = Microsoft.Diagnostics.Runtime.ClrValueType.FromAddress(elemAddr, entryType);
+                            if (hashF != null) { try { if (entryVt.ReadField<int>(hashF.Name) < 0) continue; } catch { } } // skip removed/free slots
+                            if (seen < offset) { seen++; continue; }
+                            if (entries.Count >= max) { truncated = true; break; }
+                            entries.Add(new
+                            {
+                                key = ClrStructDecoder.DecodeValueTypeMember(entryVt, keyF),
+                                value = ClrStructDecoder.DecodeValueTypeMember(entryVt, valF),
+                            });
+                            seen++;
+                        }
+                    }
+                    return new
+                    {
+                        address = (long)address,
+                        kind = "dictionary",
+                        type = name,
+                        count = liveCount,
+                        offset,
+                        returned = entries.Count,
+                        truncated,
+                        entries,
+                    };
+                }
+
+                throw new ArgumentException($"heap.read_collection supports List<T> and Dictionary<K,V>; got {name}. Use heap.read_object / heap.read_array instead.");
             });
 
         d.Register("heap.read_string",
@@ -241,6 +274,77 @@ public static class HeapHandlers
                     value,
                 };
             });
+    }
+
+    /// <summary>First field on a type matching any of the candidate names (BCL layouts differ across Framework/Core).</summary>
+    private static ClrInstanceField? FirstField(ClrType t, params string[] names)
+    {
+        foreach (var n in names) { var f = t.GetFieldByName(n); if (f != null) return f; }
+        return null;
+    }
+
+    /// <summary>
+    /// Decode elements [offset, offset+count) of a single-dimension array object.
+    /// logicalLength caps the effective length (e.g. a List's _size below the
+    /// backing array's physical length). Returns (items, length, elementType, end).
+    /// </summary>
+    private static (List<object> items, int length, ClrElementType et, int end) ReadArrayItems(ClrObject obj, int offset, int count, int? logicalLength = null)
+    {
+        var arr = obj.AsArray();
+        int length = logicalLength ?? arr.Length;
+        if (length > arr.Length) length = arr.Length;
+        var comp = obj.Type!.ComponentType;
+        var et = comp?.ElementType ?? ClrElementType.Unknown;
+        bool isRef = et == ClrElementType.Class || et == ClrElementType.Object
+                  || et == ClrElementType.Array || et == ClrElementType.SZArray;
+        int end = count == 0 ? length : Math.Min(length, offset + count);
+        var items = new List<object>();
+        for (int i = offset; i < end; i++)
+        {
+            object? val;
+            try
+            {
+                if (et == ClrElementType.String)
+                {
+                    var e = arr.GetObjectValue(i);
+                    val = e.IsNull ? null : e.AsString(int.MaxValue);
+                }
+                else if (isRef)
+                {
+                    var e = arr.GetObjectValue(i);
+                    val = e.IsNull ? (object?)null : new { kind = "object", type = e.Type?.Name, address = $"0x{e.Address:X}" };
+                }
+                else
+                {
+                    switch (et)
+                    {
+                        case ClrElementType.Boolean: val = arr.GetValue<bool>(i); break;
+                        case ClrElementType.Int8:     val = arr.GetValue<sbyte>(i); break;
+                        case ClrElementType.UInt8:    val = arr.GetValue<byte>(i); break;
+                        case ClrElementType.Int16:    val = arr.GetValue<short>(i); break;
+                        case ClrElementType.UInt16:   val = arr.GetValue<ushort>(i); break;
+                        case ClrElementType.Char:     val = (int)arr.GetValue<char>(i); break;
+                        case ClrElementType.Int32:    val = arr.GetValue<int>(i); break;
+                        case ClrElementType.UInt32:   val = arr.GetValue<uint>(i); break;
+                        case ClrElementType.Int64:    val = arr.GetValue<long>(i); break;
+                        case ClrElementType.UInt64:   val = arr.GetValue<ulong>(i); break;
+                        case ClrElementType.Float:    val = arr.GetValue<float>(i); break;
+                        case ClrElementType.Double:   val = arr.GetValue<double>(i); break;
+                        case ClrElementType.NativeInt: val = arr.GetValue<long>(i); break;
+                        case ClrElementType.Pointer:   val = arr.GetValue<long>(i); break;
+                        default:
+                            // Struct / value-type elements (incl. enums): decode in place from the element address.
+                            if (comp != null && (et == ClrElementType.Struct || comp.IsValueType))
+                                val = ClrStructDecoder.DecodeByAddress(obj.Type!.GetArrayElementAddress(obj.Address, i), comp.Name, comp);
+                            else val = $"<{et}>";
+                            break;
+                    }
+                }
+            }
+            catch (Exception ex) { val = $"<read error: {ex.Message}>"; }
+            items.Add(new { index = i, value = val });
+        }
+        return (items, length, et, end);
     }
 
     /// <summary>Decode a static field's value in an AppDomain, mirroring heap.read_object field decoding.</summary>

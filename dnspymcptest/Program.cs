@@ -12,6 +12,9 @@ internal static class Program
     public static int TickCounter;
     public static string StateLabel = "initial";
     public static readonly List<Widget> AliveWidgets = new();
+    // Static Dictionary for heap.read_collection verification.
+    public static readonly Dictionary<string, int> Counters =
+        new Dictionary<string, int> { ["alpha"] = 1, ["beta"] = 2, ["gamma"] = 3 };
 
     private static void Main(string[] args)
     {
