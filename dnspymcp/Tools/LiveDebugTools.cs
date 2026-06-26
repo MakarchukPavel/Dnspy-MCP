@@ -335,6 +335,11 @@ public static class LiveDebugTools
     public static object HeapStats(AgentRegistry reg, int top = 25, int offset = 0, int max = 200, string? agent = null)
         => Paging.PageJsonArray(reg.Get(agent).Result("heap.stats", new { top }), offset, max);
 
+    [McpServerTool(Name = "debug_heap_static_field")]
+    [Description("[DEBUG] Read a STATIC field of a type — the entry point into singletons / caches / feature toggles (e.g. read AppManager's instance static, then drill into the live object graph with debug_heap_read_object). Statics are per-AppDomain; by default reads the first AppDomain where the field is initialized. Value is decoded like debug_heap_read_object (primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address}). Params: typeName (FULL type name, e.g. 'Terrasoft.Core.AppConnection'), fieldName, appDomainIndex=-1 (or a specific index), agent (optional).")]
+    public static object HeapStaticField(AgentRegistry reg, string typeName, string fieldName, int appDomainIndex = -1, string? agent = null)
+        => reg.Get(agent).Result("heap.static_field", new { typeName, fieldName, appDomainIndex })!;
+
     [McpServerTool(Name = "debug_memory_read")]
     [Description("[DEBUG] Read raw bytes (returned as hex) at a virtual address. Params: address (ulong as string — decimal or hex e.g. '0x7ff800001234'), size:int (1..1MB).")]
     public static object MemoryRead(AgentRegistry reg, string address, int size, string? agent = null)

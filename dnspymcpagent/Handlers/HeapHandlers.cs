@@ -198,5 +198,90 @@ public static class HeapHandlers
                               .ToList();
                 return rows;
             });
+
+        d.Register("heap.static_field",
+            "[DEBUG] Read a STATIC field of a type via ClrMD — the entry point into singletons (e.g. AppManager.Instance, feature/cache statics). Statics are per-AppDomain. Params: {typeName:string (full type name, e.g. 'Terrasoft.Core.AppConnection'), fieldName:string, appDomainIndex?:int=-1 (default: first AppDomain where the field is initialized)}. Decoded like heap.read_object: primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address} to drill into with debug_heap_read_object. Returns {type, field, fieldType, appDomain, appDomainIndex, initialized, value}.",
+            p =>
+            {
+                var typeName = Dispatcher.Req<string>(p, "typeName");
+                var fieldName = Dispatcher.Req<string>(p, "fieldName");
+                var adIndex = Dispatcher.Opt<int>(p, "appDomainIndex", -1);
+
+                var clr = Program.Session.ClrRuntime;
+                var type = ClrStructDecoder.ResolveType(typeName)
+                    ?? throw new ArgumentException($"type not found (use the full type name): {typeName}");
+                var sf = type.GetStaticFieldByName(fieldName)
+                    ?? throw new ArgumentException($"static field '{fieldName}' not found on {type.Name}");
+
+                var domains = clr.AppDomains;
+                if (domains.Length == 0) throw new InvalidOperationException("no AppDomains");
+                Microsoft.Diagnostics.Runtime.ClrAppDomain ad;
+                if (adIndex >= 0)
+                {
+                    if (adIndex >= domains.Length) throw new ArgumentException($"appDomainIndex {adIndex} out of range (0..{domains.Length - 1})");
+                    ad = domains[adIndex];
+                }
+                else
+                {
+                    ad = domains.FirstOrDefault(d => { try { return sf.IsInitialized(d); } catch { return false; } }) ?? domains[0];
+                    adIndex = System.Array.IndexOf(domains.ToArray(), ad);
+                }
+
+                bool initialized;
+                try { initialized = sf.IsInitialized(ad); } catch { initialized = false; }
+                object? value = ReadStaticValue(sf, ad);
+                return new
+                {
+                    type = type.Name,
+                    field = fieldName,
+                    fieldType = sf.Type?.Name,
+                    appDomain = ad.Name,
+                    appDomainIndex = adIndex,
+                    initialized,
+                    value,
+                };
+            });
     }
+
+    /// <summary>Decode a static field's value in an AppDomain, mirroring heap.read_object field decoding.</summary>
+    private static object? ReadStaticValue(ClrStaticField sf, Microsoft.Diagnostics.Runtime.ClrAppDomain ad)
+    {
+        try
+        {
+            if (sf.IsObjectReference)
+            {
+                var o = sf.ReadObject(ad);
+                if (o.IsNull) return new { kind = "null" };
+                if (o.Type?.IsString == true) return new { kind = "string", value = o.AsString(int.MaxValue) };
+                return new { kind = "object", type = o.Type?.Name, address = $"0x{o.Address:X}" };
+            }
+            if (sf.ElementType == ClrElementType.String)
+                return new { kind = "string", value = sf.ReadString(ad) };
+            if (ClrStructDecoder.IsPrimitive(sf.ElementType))
+                return new { kind = "primitive", elementType = sf.ElementType.ToString(), value = ClrStructDecoder.DecorateEnum(sf.Type, ReadStaticPrimitive(sf, ad)) };
+            if (sf.IsValueType)
+                return ClrStructDecoder.DecodeValueType(sf.ReadStruct(ad));
+            return new { kind = "raw", elementType = sf.ElementType.ToString() };
+        }
+        catch (Exception ex) { return new { kind = "error", error = ex.Message }; }
+    }
+
+    private static object? ReadStaticPrimitive(ClrStaticField sf, Microsoft.Diagnostics.Runtime.ClrAppDomain ad) => sf.ElementType switch
+    {
+        ClrElementType.Boolean   => sf.Read<bool>(ad),
+        ClrElementType.Char      => (int)sf.Read<char>(ad),
+        ClrElementType.Int8      => sf.Read<sbyte>(ad),
+        ClrElementType.UInt8     => sf.Read<byte>(ad),
+        ClrElementType.Int16     => sf.Read<short>(ad),
+        ClrElementType.UInt16    => sf.Read<ushort>(ad),
+        ClrElementType.Int32     => sf.Read<int>(ad),
+        ClrElementType.UInt32    => sf.Read<uint>(ad),
+        ClrElementType.Int64     => sf.Read<long>(ad),
+        ClrElementType.UInt64    => sf.Read<ulong>(ad),
+        ClrElementType.Float     => sf.Read<float>(ad),
+        ClrElementType.Double    => sf.Read<double>(ad),
+        ClrElementType.NativeInt => sf.Read<long>(ad),
+        ClrElementType.Pointer   => sf.Read<long>(ad),
+        _ => $"<{sf.ElementType}>",
+    };
 }

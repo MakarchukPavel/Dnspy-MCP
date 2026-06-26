@@ -148,6 +148,24 @@ def test_heap_read_object_decodes_struct_fields(live_agent):
     assert ev.get("name") in {"Unknown", "Gadget", "Gizmo", "Doohickey"}, f"enum name not mapped: {ev}"
 
 
+def test_heap_static_field(live_agent, mcp):
+    """debug_heap_static_field reads a type's static fields (the entry point into
+    singletons). Program has TickCounter (int) and StateLabel (string). Skips if
+    the host predates the tool."""
+    if not any(t.get("name") == "debug_heap_static_field" for t in mcp.list_tools()):
+        pytest.skip("debug_heap_static_field not in this MCP host build (rebuild dist via builder.ps1)")
+    T = "DnSpyMcp.TestTarget.Program"
+    tc = live_agent.call_json("debug_heap_static_field", {"typeName": T, "fieldName": "TickCounter"})
+    assert tc["fieldType"] == "System.Int32" and tc["initialized"], tc
+    assert tc["value"]["kind"] == "primitive" and isinstance(tc["value"]["value"], int), tc
+    sl = live_agent.call_json("debug_heap_static_field", {"typeName": T, "fieldName": "StateLabel"})
+    assert sl["value"]["kind"] == "string", sl
+    aw = live_agent.call_json("debug_heap_static_field", {"typeName": T, "fieldName": "AliveWidgets"})
+    assert aw["value"]["kind"] == "object" and "List" in (aw["value"].get("type") or ""), aw
+    # unknown field -> structured error
+    assert not live_agent.call("debug_heap_static_field", {"typeName": T, "fieldName": "Nope"})["ok"]
+
+
 def test_heap_read_string(live_agent):
     strs = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "System.String", "max": 1}))
     if not strs:

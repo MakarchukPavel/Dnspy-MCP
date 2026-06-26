@@ -267,7 +267,8 @@ public static class ClrStructDecoder
         try { return t.AsEnum().ElementType; } catch { return ClrElementType.Int32; }
     }
 
-    private static ClrType? ResolveType(string? fullName)
+    /// <summary>Resolve a full type name to a ClrType by scanning loaded modules (cached).</summary>
+    public static ClrType? ResolveType(string? fullName)
     {
         if (string.IsNullOrEmpty(fullName)) return null;
         if (_typeByName.TryGetValue(fullName!, out var cached)) return cached;

@@ -163,6 +163,7 @@ debug_exception_ignore_clear
 debug_heap_find_instances / debug_heap_read_object
 debug_heap_read_array                            # elements of a List<T> backing / T[]
 debug_heap_read_string / debug_heap_stats
+debug_heap_static_field                          # read a type's static field (entry into singletons)
 
 # memory
 debug_memory_read / debug_memory_write / debug_memory_read_int / debug_disasm
