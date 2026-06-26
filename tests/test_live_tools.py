@@ -495,6 +495,36 @@ def test_eval_call_args_and_generics(live_agent, mcp):
         live_agent.call_json("debug_go")
 
 
+def test_eval_call_overload_by_arg_type(live_agent, mcp):
+    """func-eval v3: among same-arity overloads, the one whose parameter types
+    fit the argument literals wins. Pick<T>(string) vs Pick<T>(Widget) and
+    Classify(string) vs Classify(int) — mirrors Entity.GetTypedColumnValue<T>(string)
+    vs <T>(EntitySchemaColumn). Skips if the host predates the tool."""
+    if not any(t.get("name") == "debug_eval_call" for t in mcp.list_tools()):
+        pytest.skip("debug_eval_call not in this MCP host build (rebuild dist via builder.ps1)")
+
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect"})
+    bp_id = bp["id"]
+    try:
+        assert live_agent.call_json("debug_wait_paused", {"timeoutMs": 6000})["state"] == "Paused"
+
+        # generic, ambiguous: string arg must pick Pick<T>(string), not Pick<T>(Widget)
+        pick = live_agent.call_json("debug_eval_call", {"expr": "arg0.Pick<System.Object>(\"hi\")"})["value"]
+        assert pick.get("kind") == "string" and pick["value"] == "str:hi", pick
+
+        # non-generic: string vs int overload picked by literal type
+        cs = live_agent.call_json("debug_eval_call", {"expr": "arg0.Classify(\"x\")"})["value"]
+        assert cs.get("value") == "S:x", cs
+        ci = live_agent.call_json("debug_eval_call", {"expr": "arg0.Classify(7)"})["value"]
+        assert ci.get("value") == "I:7", ci
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
 def test_conditional_bp_invalid_syntax(live_agent):
     r = live_agent.call("debug_bp_set_by_name", {
         "modulePath": "dnspymcptest",

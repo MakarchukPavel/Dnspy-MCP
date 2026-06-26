@@ -38,7 +38,7 @@ public static class EvalHandlers
             p => Program.Session.OnDbg<object>(() => Evaluate(p)));
 
         d.Register("eval.call",
-            "[DEBUG] Invoke an instance method or property getter on the paused frame's receiver and return the result — real func-eval via ICorDebug (RUNS target code). expr = \"<root>.<member>[<TypeArgs>]([args])\", root = arg<i>/local<i>/'this'. A bare <member> (no parens) is a property getter (get_<member>) then a 0-arg method; <member>(...) calls a method; generic methods take explicit type args, e.g. \"arg0.GetTypedColumnValue<System.Guid>('UId')\". Argument literals: integer (dec/0x-hex), true/false, null, or a quoted string (match the parameter type — literals are not coerced). Overloads are selected by (arg count, type-arg count). Resolves across the type hierarchy (incl. base types). Runs on the paused thread with all other threads SUSPENDED and a timeout (default 2000ms) + abort. ⚠ Runs target code: if it blocks on a lock another thread holds it stalls until the timeout. Result decoded like eval.expression; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. Params: {expr:string, frameIndex?:int=0, timeoutMs?:int=2000}. Not supported: non-literal/object args, generic type args that are themselves generic, value-type (struct) receivers, multi-hop receivers (a.b.M()).",
+            "[DEBUG] Invoke an instance method or property getter on the paused frame's receiver and return the result — real func-eval via ICorDebug (RUNS target code). expr = \"<root>.<member>[<TypeArgs>]([args])\", root = arg<i>/local<i>/'this'. A bare <member> (no parens) is a property getter (get_<member>) then a 0-arg method; <member>(...) calls a method; generic methods take explicit type args, e.g. \"arg0.GetTypedColumnValue<System.Guid>('UId')\". Argument literals: integer (dec/0x-hex), true/false, null, or a quoted string. Overloads are selected by (arg count, type-arg count, AND argument type — a string literal picks the (string) overload over a (SomeClass) one). Resolves across the type hierarchy (incl. base types). Runs on the paused thread with all other threads SUSPENDED and a timeout (default 2000ms) + abort. ⚠ Runs target code: if it blocks on a lock another thread holds it stalls until the timeout. Result decoded like eval.expression; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. Params: {expr:string, frameIndex?:int=0, timeoutMs?:int=2000}. Not supported: non-literal/object args, generic type args that are themselves generic, value-type (struct) receivers, multi-hop receivers (a.b.M()).",
             p => Program.Session.OnDbg<object>(() => CallExpr(p)));
     }
 
@@ -118,14 +118,14 @@ public static class EvalHandlers
         CorFunction func; CorType declType; CorValue[] args;
         if (!isCall)
         {
-            var r0 = ResolveMethodForCall(exactType, new[] { "get_" + member, member }, 0, 0)
+            var r0 = ResolveMethodForCall(exactType, new[] { "get_" + member, member }, System.Array.Empty<ArgLit>(), 0)
                 ?? throw new ArgumentException($"member '{member}' not found as a 0-arg property getter or method on {typeName} or its base types");
             (func, declType) = r0;
             args = new[] { rootVal };
         }
         else
         {
-            var r0 = ResolveMethodForCall(exactType, new[] { member }, argLits.Count, typeArgNames.Count)
+            var r0 = ResolveMethodForCall(exactType, new[] { member }, argLits, typeArgNames.Count)
                 ?? throw new ArgumentException($"no overload of '{member}' taking {argLits.Count} argument(s) and {typeArgNames.Count} type argument(s) found on {typeName} or its base types");
             (func, declType) = r0;
             var proc = thread.CorThread?.Process;
@@ -277,31 +277,101 @@ public static class EvalHandlers
 
     /// <summary>
     /// Walk the type hierarchy from <paramref name="startType"/> up its base
-    /// chain; return the first (CorFunction, declaring CorType) where any of
-    /// <paramref name="names"/> resolves to a method with matching parameter
-    /// count and generic arity. Base CorTypes carry their own metadata/module,
-    /// so inherited / cross-module members (e.g. Object.ToString) resolve too.
+    /// chain; return the (CorFunction, declaring CorType) for the best-matching
+    /// overload of any of <paramref name="names"/> with the given generic arity
+    /// and argument count. Among same-arity overloads the one whose parameter
+    /// types best fit the supplied argument literals wins (so a string literal
+    /// picks `(string)` over `(EntitySchemaColumn)`). Base CorTypes carry their
+    /// own metadata, so inherited / cross-module members resolve too.
     /// </summary>
-    private static (CorFunction func, CorType declType)? ResolveMethodForCall(CorType startType, string[] names, int argCount, int genArity)
+    private static (CorFunction func, CorType declType)? ResolveMethodForCall(CorType startType, string[] names, IReadOnlyList<ArgLit> args, int genArity)
     {
+        int argCount = args.Count;
         for (var t = startType; t != null; t = t.Base)
         {
             if (!t.HasClass) continue;
             var mdi = t.GetMetaDataImport(out uint typeToken);
             if (mdi == null || typeToken == 0) continue;
+
+            CorFunction? bestFunc = null;
+            int bestScore = int.MinValue;
             foreach (var name in names)
             {
                 foreach (var mt in dndbg.Engine.MDAPI.GetMethodTokens(mdi, typeToken))
                 {
                     if (!string.Equals(dndbg.Engine.MDAPI.GetMethodName(mdi, mt), name, StringComparison.Ordinal)) continue;
-                    if (!SignatureUtils.TryGetMethodArity(mdi, mt, out int ga, out int pc)) continue;
+
+                    int ga, pc, score;
+                    if (SignatureUtils.TryGetMethodSig(mdi, mt, out ga, out var ptypes))
+                    {
+                        pc = ptypes.Length;
+                        score = ScoreArgs(args, ptypes);
+                    }
+                    else
+                    {
+                        // Couldn't parse the full signature — fall back to arity only.
+                        if (!SignatureUtils.TryGetMethodArity(mdi, mt, out ga, out pc)) continue;
+                        score = int.MinValue + 1; // accept, but lose to any type-scored match
+                    }
                     if (pc != argCount || ga != genArity) continue;
-                    var func = t.Class?.Module?.GetFunctionFromToken(mt);
-                    if (func != null) return (func, t);
+
+                    if (score > bestScore)
+                    {
+                        var func = t.Class?.Module?.GetFunctionFromToken(mt);
+                        if (func != null) { bestFunc = func; bestScore = score; }
+                    }
                 }
             }
+            if (bestFunc != null) return (bestFunc, t);
         }
         return null;
+    }
+
+    // Score how well the argument literals fit a candidate's parameter types;
+    // higher = better. Lets overload resolution prefer an exact-ish parameter
+    // type (string->String) over a merely-reference-compatible one.
+    private static int ScoreArgs(IReadOnlyList<ArgLit> args, CorElementType[] ptypes)
+    {
+        int s = 0;
+        for (int i = 0; i < args.Count && i < ptypes.Length; i++) s += MatchScore(args[i].Kind, ptypes[i]);
+        return s;
+    }
+
+    private static bool IsNumericElement(CorElementType et) => et switch
+    {
+        CorElementType.Char or CorElementType.I1 or CorElementType.U1
+        or CorElementType.I2 or CorElementType.U2 or CorElementType.I4 or CorElementType.U4
+        or CorElementType.I8 or CorElementType.U8 or CorElementType.R4 or CorElementType.R8
+        or CorElementType.I or CorElementType.U => true,
+        _ => false,
+    };
+
+    private static int MatchScore(ArgKind kind, CorElementType pet)
+    {
+        bool isGenericVar = pet == CorElementType.Var || pet == CorElementType.MVar;
+        switch (kind)
+        {
+            case ArgKind.Str:
+                if (pet == CorElementType.String) return 3;
+                if (pet == CorElementType.Object) return 2;
+                if (isGenericVar) return 2;
+                if (pet == CorElementType.Class || pet == CorElementType.GenericInst) return 1;
+                return -3;
+            case ArgKind.Int:
+                if (IsNumericElement(pet)) return 3;
+                if (pet == CorElementType.Object || isGenericVar) return 1;
+                if (pet == CorElementType.Boolean) return 0;
+                return -3;
+            case ArgKind.Bool:
+                if (pet == CorElementType.Boolean) return 3;
+                if (pet == CorElementType.Object || isGenericVar) return 1;
+                if (IsNumericElement(pet)) return 0;
+                return -3;
+            default: // Null — fits any reference type, not a value type
+                if (pet == CorElementType.Class || pet == CorElementType.Object || pet == CorElementType.String
+                    || pet == CorElementType.SZArray || pet == CorElementType.GenericInst || isGenericVar) return 2;
+                return -3;
+        }
     }
 
     private static readonly HashSet<string> KnownValueTypes = new(StringComparer.Ordinal)

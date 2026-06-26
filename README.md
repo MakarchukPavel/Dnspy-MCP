@@ -350,10 +350,12 @@ debug_eval_call(expr="this.GetTypedColumnValue<System.Guid>('UId')")  # generic 
 
 The receiver is a root slot (`arg<i>` / `local<i>` / `this`); the member
 resolves across the type hierarchy (including inherited / cross-module members
-like `Object.ToString`). Overloads are selected by **(argument count, type-arg
-count)**. Argument literals are an integer (dec / `0x`-hex), `true`/`false`,
-`null`, or a quoted string — they must match the parameter type (literals are
-not coerced). Generic methods take explicit type arguments in `<...>`. The eval
+like `Object.ToString`). Overloads are selected by **argument count, type-arg
+count, and argument type** — a string literal picks the `(string)` overload
+over a `(SomeClass)` one, so `GetTypedColumnValue<Guid>("Id")` binds to the
+`(string)` overload rather than the `(EntitySchemaColumn)` one. Argument
+literals are an integer (dec / `0x`-hex), `true`/`false`, `null`, or a quoted
+string. Generic methods take explicit type arguments in `<...>`. The eval
 runs on the paused thread with **all other threads suspended** and a timeout
 (default 2000 ms) + abort. The result is decoded like `debug_eval`; a thrown
 exception returns `{kind:"exception", type, message}`; a timeout returns

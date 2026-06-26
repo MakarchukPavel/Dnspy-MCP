@@ -183,4 +183,12 @@ public sealed class Widget
     public int Plus(int n) => Value + n;
     public string TypeName<T>() => typeof(T).Name;
     public string Combine<T>(string label) => $"{label}:{typeof(T).Name}";
+
+    // Func-eval v3 targets: ambiguous overloads (same arity) that differ only by
+    // parameter type — mirrors Entity.GetTypedColumnValue<T>(string) vs
+    // <T>(EntitySchemaColumn). Overload selection must use the arg's type.
+    public string Pick<T>(string s) => "str:" + s;
+    public string Pick<T>(Widget other) => "widget:" + (other?.Name ?? "null");
+    public string Classify(string s) => "S:" + s;
+    public string Classify(int n) => "I:" + n;
 }
