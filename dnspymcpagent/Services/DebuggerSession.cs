@@ -402,9 +402,16 @@ public sealed class DebuggerSession : IDisposable
     }
 
     /// <summary>Full type name ("Ns.Type" / "Ns.Outer+Inner") of a thrown exception CorValue, or null.</summary>
-    internal static string? TryGetExceptionTypeName(CorValue? exObj)
+    internal static string? TryGetExceptionTypeName(CorValue? exObj) => TryGetCorValueTypeName(exObj);
+
+    /// <summary>
+    /// Full type name ("Ns.Type" / "Ns.Outer+Inner") of any CorValue via its
+    /// ExactType metadata, or null. Used to resolve value-type locals/arguments
+    /// so they can be decoded by name (Guid/DateTime/enum/struct).
+    /// </summary>
+    internal static string? TryGetCorValueTypeName(CorValue? v)
     {
-        var exactType = exObj?.ExactType;
+        var exactType = v?.ExactType;
         if (exactType is null) return null;
         var mdi = exactType.GetMetaDataImport(out uint token);
         if (mdi is null) return null;

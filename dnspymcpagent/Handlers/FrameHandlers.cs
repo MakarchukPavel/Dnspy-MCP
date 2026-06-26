@@ -90,7 +90,7 @@ public static class FrameHandlers
         };
     }
 
-    private static CorFrame? WalkToFrame(DnThread thread, int targetIndex)
+    internal static CorFrame? WalkToFrame(DnThread thread, int targetIndex)
     {
         int idx = 0;
         foreach (var chain in thread.CorThread.Chains)
@@ -111,7 +111,7 @@ public static class FrameHandlers
     /// so the caller has enough context to drill down with debug_heap_*
     /// without crashing on unsupported shapes.
     /// </summary>
-    private static object? ReadValue(CorValue v)
+    internal static object? ReadValue(CorValue v)
     {
         try
         {
@@ -147,6 +147,16 @@ public static class FrameHandlers
                 }
                 case CorElementType.String:
                     return new { kind = "string", value = v.String };
+                case CorElementType.ValueType:
+                {
+                    // Struct local/arg: resolve the type name from metadata and decode
+                    // (Guid/DateTime/decimal/enum or one level of fields) off target
+                    // memory at the value's address, instead of the old {kind:raw}.
+                    var typeName = DebuggerSession.TryGetCorValueTypeName(v);
+                    if (v.Address != 0 && typeName != null)
+                        return ClrStructDecoder.DecodeByAddress(v.Address, typeName, null);
+                    return new { kind = "raw", elementType = v.ElementType.ToString(), typeName, address = (long)v.Address };
+                }
                 default:
                     return new { kind = "raw", elementType = v.ElementType.ToString(), address = (long)v.Address };
             }

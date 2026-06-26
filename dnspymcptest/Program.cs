@@ -32,6 +32,10 @@ internal static class Program
             TickCounter++;
             StateLabel = TickCounter % 2 == 0 ? "even" : "odd";
             var result = Compute(TickCounter, TickCounter * 3);
+            // Pass a Widget through a method each tick so value-based breakpoint
+            // conditions (arg0.Value == N, arg0.Kind == 'Gadget', arg0.Name == ...)
+            // have a live object argument to evaluate against.
+            Inspect(AliveWidgets[TickCounter % AliveWidgets.Count]);
             if (TickCounter % 10 == 0)
                 Console.WriteLine($"[tick {TickCounter}] state={StateLabel} compute={result} widgets={AliveWidgets.Count}");
             if (TickCounter % 50 == 0)
@@ -51,6 +55,11 @@ internal static class Program
     }
 
     private static int Add(int a, int b) => a + b;
+
+    // Receives a Widget every tick — exists so value-based conditional
+    // breakpoints can gate on an object argument's fields (arg0.Value,
+    // arg0.Name, arg0.Kind). Returns the value so it isn't optimized away.
+    private static int Inspect(Widget w) => w.Value;
 
     // Overloads — used by reverse_list_overloads / signature-selection tests.
     public static string Greet(string name) => $"hi {name}";
@@ -132,17 +141,32 @@ public sealed class TagAttribute : Attribute
     public TagAttribute(string name) => Name = name;
 }
 
+// Enum used to verify the struct-decoder maps numeric values to member names.
+public enum WidgetKind
+{
+    Unknown = 0,
+    Gadget = 1,
+    Gizmo = 2,
+    Doohickey = 7,
+}
+
 public sealed class Widget
 {
     public string Name { get; }
     public int Value { get; set; }
     public DateTime CreatedAt { get; }
+    // Value-type fields exercised by the struct-decoder regression tests:
+    // Guid (well-known raw-read path) and an enum (name-mapping path).
+    public Guid Id { get; }
+    public WidgetKind Kind { get; }
 
     public Widget(string name, int value)
     {
         Name = name;
         Value = value;
         CreatedAt = DateTime.UtcNow;
+        Id = Guid.NewGuid();
+        Kind = (WidgetKind)(value % 3); // 0/1/2 -> Unknown/Gadget/Gizmo
     }
 
     public override string ToString() => $"Widget({Name}, {Value})";

@@ -183,6 +183,11 @@ public static class LiveDebugTools
     public static object CurrentThread(AgentRegistry reg, string? agent = null)
         => reg.Get(agent).Result("thread.current")!;
 
+    [McpServerTool(Name = "debug_eval")]
+    [Description("[DEBUG] Read a value expression against the currently-paused frame WITHOUT running any target code (passive object-graph read — NOT func-eval). expr starts with a root — arg<i>, local<i>, or 'this' (= arg0 on instance methods) — then an optional dotted field/auto-property path. Examples: \"arg0\", \"this.Entity\", \"arg1.Owner.Name\", \"local0.UId\". Property names resolve their backing field; Guid/DateTime/enum/struct leaves are decoded; an object leaf returns {kind:object,type,address} to drill into with debug_heap_read_object. Method/property invocation (.ToString(), GetX()) is unsupported by design — ICorDebug func-eval can deadlock a live worker. Params: expr (required), frameIndex=0.")]
+    public static object Eval(AgentRegistry reg, string expr, int frameIndex = 0, string? agent = null)
+        => reg.Get(agent).Result("eval.expression", new { expr, frameIndex })!;
+
     // ---- modules --------------------------------------------------------
 
     [McpServerTool(Name = "debug_list_modules")]
@@ -203,7 +208,7 @@ public static class LiveDebugTools
     // ---- breakpoints ----------------------------------------------------
 
     [McpServerTool(Name = "debug_bp_set_il")]
-    [Description("[DEBUG] Set an IL-offset breakpoint. Params: modulePath (suffix ok), token (uint as string — decimal '123' or hex '0x06000123'; also 0o / 0b accepted), offset (uint, default '0'; same forms), condition (optional, format `count <op> N` where op is ==/!=/>=/<=/>/<; e.g. 'count >= 5' to skip the first 4 hits).")]
+    [Description("[DEBUG] Set an IL-offset breakpoint. Params: modulePath (suffix ok), token (uint as string — decimal '123' or hex '0x06000123'; also 0o / 0b accepted), offset (uint, default '0'; same forms), condition (optional; op ==/!=/>=/<=/>/<). condition is either `count <op> N` (e.g. 'count >= 5' skips the first 4 hits) or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame. Literals: integer (dec or 0x-hex), true/false, null, or a quoted string. Guid/DateTime fields compare by text, enums by member name; property names resolve their backing field — e.g. \"arg0.UId == '0c81...'\", \"local1 > 100\", \"arg1.Name != null\".")]
     public static object BpSetIl(AgentRegistry reg, string modulePath, string token, string offset = "0", string? condition = null, string? agent = null)
     {
         var tok = Numbers.ParseUInt32(token, "token");
@@ -212,7 +217,7 @@ public static class LiveDebugTools
     }
 
     [McpServerTool(Name = "debug_bp_set_by_name")]
-    [Description("[DEBUG] Set a breakpoint at IL=0 of a named method. Params: modulePath, typeFullName, methodName, overloadIndex=0, condition (optional, format `count <op> N`).")]
+    [Description("[DEBUG] Set a breakpoint at IL=0 of a named method. Params: modulePath, typeFullName, methodName, overloadIndex=0, condition (optional; op ==/!=/>=/<=/>/<). condition is either `count <op> N` (pause on the Nth hit onward, e.g. 'count >= 5') or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame (arg0 = 'this' on instance methods). Literals: integer (dec or 0x-hex), true/false, null, or quoted string. Guid/DateTime fields compare by text, enums by member name; property names resolve their backing field — e.g. \"arg0.Id == '0c81...'\", \"arg1 >= 10\", \"arg2.Name == 'Contact'\".")]
     public static object BpSetByName(AgentRegistry reg, string modulePath, string typeFullName, string methodName, int overloadIndex = 0, string? condition = null, string? agent = null)
         => reg.Get(agent).Result("bp.set_by_name", new { modulePath, typeFullName, methodName, overloadIndex, condition })!;
 

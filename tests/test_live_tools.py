@@ -119,6 +119,35 @@ def test_heap_read_widget_object(live_agent):
     assert obj is not None
 
 
+def test_heap_read_object_decodes_struct_fields(live_agent):
+    """Widget has three value-type fields that previously rendered as the
+    opaque "<Struct>" placeholder. The struct-decoder must now resolve:
+      - CreatedAt (System.DateTime) -> {kind:"DateTime", value: ISO-8601}
+      - Id        (System.Guid)     -> {kind:"Guid", value: guid text}
+      - Kind      (WidgetKind enum) -> {kind:"enum", name: member}"""
+    rows = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "Widget", "max": 64}))
+    # "Widget" also substring-matches List<Widget>; keep only actual Widget instances.
+    widgets = [r for r in rows if (r.get("type") or "").endswith(".Widget")]
+    assert widgets, f"no concrete Widget instance on heap: {rows}"
+    addr = widgets[0]["address"]
+    obj = live_agent.call_json("debug_heap_read_object", {"address": str(int(addr)), "maxFields": 32})
+    by_type = {(f.get("typeName") or ""): f for f in obj["fields"]}
+
+    dt = by_type.get("System.DateTime")
+    assert dt and isinstance(dt["value"], dict) and dt["value"].get("kind") == "DateTime", f"DateTime not decoded: {obj['fields']}"
+    assert "T" in str(dt["value"].get("value")), f"unexpected DateTime rendering: {dt}"
+
+    guid = by_type.get("System.Guid")
+    assert guid and isinstance(guid["value"], dict) and guid["value"].get("kind") == "Guid", f"Guid not decoded: {obj['fields']}"
+    # Guid.ToString() is 8-4-4-4-12 hex -> 36 chars with 4 dashes.
+    assert str(guid["value"].get("value")).count("-") == 4, f"unexpected Guid rendering: {guid}"
+
+    enum_fields = [f for f in obj["fields"] if isinstance(f.get("value"), dict) and f["value"].get("kind") == "enum"]
+    assert enum_fields, f"WidgetKind enum field not decoded: {obj['fields']}"
+    ev = enum_fields[0]["value"]
+    assert ev.get("name") in {"Unknown", "Gadget", "Gizmo", "Doohickey"}, f"enum name not mapped: {ev}"
+
+
 def test_heap_read_string(live_agent):
     strs = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "System.String", "max": 1}))
     if not strs:
@@ -263,6 +292,135 @@ def test_frame_locals_arguments(live_agent):
         # locals depending on optimization. Smoke: the call returns count>=0.
         locals_ = live_agent.call_json("debug_frame_locals", {"frameIndex": 0})
         assert locals_["count"] >= 0
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
+def _drain_bps(live_agent):
+    for old in _items(live_agent.call_json("debug_bp_list")):
+        live_agent.call_json("debug_bp_delete", {"id": old["id"]})
+    live_agent.call_json("debug_go")
+
+
+def test_conditional_bp_value_arg_primitive(live_agent):
+    """Value condition on a bare primitive argument: `arg0 == N`. We learn the
+    current Add() arg0 while paused, arm `arg0 == current+4`, then confirm the
+    next pause lands exactly on that value."""
+    _drain_bps(live_agent)
+    plain = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Add"})
+    plain_id = plain["id"]
+    r = live_agent.call_json("debug_wait_paused", {"timeoutMs": 5000})
+    assert r["state"] == "Paused", r
+    cur = live_agent.call_json("debug_frame_arguments", {"frameIndex": 0})["items"][0]["value"]["value"]
+    target = int(cur) + 4
+
+    cond = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Add", "condition": f"arg0 == {target}"})
+    cond_id = cond["id"]
+    assert cond["condition"] == f"arg0 == {target}"
+    live_agent.call_json("debug_bp_delete", {"id": plain_id})
+    live_agent.call_json("debug_go")
+    try:
+        r2 = live_agent.call_json("debug_wait_paused", {"timeoutMs": 6000})
+        assert r2["state"] == "Paused", r2
+        got = live_agent.call_json("debug_frame_arguments", {"frameIndex": 0})["items"][0]["value"]["value"]
+        assert int(got) == target, f"expected arg0=={target}, got {got}"
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": cond_id})
+        live_agent.call_json("debug_go")
+
+
+def _arg0_object_fields(live_agent):
+    args = live_agent.call_json("debug_frame_arguments", {"frameIndex": 0})
+    a0 = args["items"][0]["value"]
+    assert a0.get("kind") == "object", f"arg0 not an object: {a0}"
+    obj = live_agent.call_json("debug_heap_read_object", {"address": str(int(a0["address"])), "maxFields": 32})
+    return obj["fields"]
+
+
+def test_conditional_bp_value_field_int(live_agent):
+    """Field-path value condition `arg0.Value == 14` on Inspect(Widget). Only
+    the widget whose Value is 14 should trigger the pause."""
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect", "condition": "arg0.Value == 14"})
+    bp_id = bp["id"]
+    try:
+        r = live_agent.call_json("debug_wait_paused", {"timeoutMs": 10000})
+        assert r["state"] == "Paused", r
+        fields = _arg0_object_fields(live_agent)
+        val = next(f["value"] for f in fields if "Value" in f["name"])
+        assert val == 14, f"condition fired on wrong widget: {fields}"
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
+def test_conditional_bp_value_field_enum(live_agent):
+    """Field-path enum condition `arg0.Kind == 'Gadget'` compares by member
+    name. Only widgets whose Kind is Gadget should trigger the pause."""
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect", "condition": "arg0.Kind == 'Gadget'"})
+    bp_id = bp["id"]
+    try:
+        r = live_agent.call_json("debug_wait_paused", {"timeoutMs": 10000})
+        assert r["state"] == "Paused", r
+        fields = _arg0_object_fields(live_agent)
+        kind = next(f["value"] for f in fields if "Kind" in f["name"])
+        assert isinstance(kind, dict) and kind.get("name") == "Gadget", f"wrong enum match: {kind}"
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
+def test_eval_expression_object_graph(live_agent, mcp):
+    """debug_eval reads an object-graph path off the paused frame without
+    running target code. Pauses in Inspect(Widget) and reads arg0 plus a
+    string / int / enum / Guid / DateTime field. Skips when the running MCP
+    host predates the tool (dist not rebuilt) — the agent side is covered by
+    the standalone probe regardless."""
+    if not any(t.get("name") == "debug_eval" for t in mcp.list_tools()):
+        pytest.skip("debug_eval not in this MCP host build (rebuild dist via builder.ps1)")
+
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect"})
+    bp_id = bp["id"]
+    try:
+        r = live_agent.call_json("debug_wait_paused", {"timeoutMs": 6000})
+        assert r["state"] == "Paused", r
+
+        root = live_agent.call_json("debug_eval", {"expr": "arg0"})["value"]
+        assert root.get("kind") == "object", root
+
+        name = live_agent.call_json("debug_eval", {"expr": "arg0.Name"})["value"]
+        assert name.get("kind") == "string" and str(name.get("value")).startswith("widget-"), name
+
+        val = live_agent.call_json("debug_eval", {"expr": "arg0.Value"})["value"]
+        assert val.get("kind") == "primitive" and isinstance(val.get("value"), int), val
+
+        gid = live_agent.call_json("debug_eval", {"expr": "arg0.Id"})["value"]
+        assert gid.get("kind") == "Guid", gid
+
+        kind = live_agent.call_json("debug_eval", {"expr": "arg0.Kind"})["value"]
+        # enum surfaces nested under the primitive wrapper
+        enum_obj = kind.get("value") if isinstance(kind.get("value"), dict) else kind
+        assert enum_obj.get("name") in {"Unknown", "Gadget", "Gizmo", "Doohickey"}, kind
+
+        # unknown field -> structured error, not an exception
+        miss = live_agent.call_json("debug_eval", {"expr": "arg0.Nope"})["value"]
+        assert miss.get("kind") == "error", miss
+
+        # method invocation is rejected at the tool boundary
+        assert not live_agent.call("debug_eval", {"expr": "arg0.ToString()"})["ok"]
     finally:
         live_agent.call_json("debug_bp_delete", {"id": bp_id})
         live_agent.call_json("debug_go")

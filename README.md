@@ -140,9 +140,10 @@ debug_step_in / debug_step_over / debug_step_out
 # threads / frames / modules
 debug_thread_list / debug_thread_stack / debug_thread_current
 debug_frame_locals / debug_frame_arguments
+debug_eval                                       # passive object-graph path read (no func-eval)
 debug_list_modules / debug_find_type / debug_list_type_methods
 
-# breakpoints (with optional `count <op> N` conditions)
+# breakpoints (optional conditions: `count <op> N` or value gate `arg/local[.field] <op> literal`)
 debug_bp_set_il / debug_bp_set_by_name / debug_bp_set_native
 debug_bp_list / debug_bp_delete / debug_bp_enable / debug_bp_disable
 
@@ -246,7 +247,9 @@ target's. Stop the agent and close Claude Code before rebuilding — the running
 ## Conditional breakpoints (D2)
 
 `debug_bp_set_by_name` and `debug_bp_set_il` accept an optional
-`condition` string of the form `count <op> N`:
+`condition` string. Operators are `==`, `!=`, `>=`, `<=`, `>`, `<`.
+
+**Hit-count gate** — `count <op> N`:
 
 ```
 condition: "count >= 5"   # pause on the 5th hit and every hit after
@@ -254,6 +257,28 @@ condition: "count == 1"   # one-shot (only the first hit fires)
 condition: "count != 0"   # always fires (count is post-increment)
 condition: "count > 100"  # busy loop survey
 ```
+
+**Value gate** — compare an argument or local (optionally a field path)
+against a literal, evaluated against the frame at each hit:
+
+```
+condition: "arg0 == 12"              # primitive arg (arg0 is `this` on instance methods)
+condition: "local2 >= 100"           # primitive local
+condition: "arg0.Value == 14"        # field path (property names work — backing fields resolved)
+condition: "arg1.Name != null"       # null / non-null reference check
+condition: "arg0.Name == 'Contact'"  # string field equality
+condition: "arg2.Kind == 'Gadget'"   # enum compared by member name (or by number)
+condition: "arg0.UId == '0c81...'"   # Guid/DateTime fields compare by text form
+```
+
+Literals are an integer (decimal or `0x`-hex), `true`/`false`, `null`, or a
+single/double-quoted string. Field paths may be multi-level (`arg0.Owner.Name`)
+and are walked with ClrMD off the dereferenced object — a passive read, safe
+inside the condition callback (ICorDebug forbids func-eval there, so calling
+properties/methods is *not* supported; only field/auto-property reads). If a
+value condition can't be evaluated (slot optimized away, field missing) the
+breakpoint **fails open** and pauses, so a mistyped path surfaces rather than
+silently swallowing every hit.
 
 The agent records every callback invocation (`hitCount` in `bp.list`)
 regardless of whether the predicate let the pause through, so the
@@ -267,8 +292,10 @@ While paused, `debug_frame_locals` and `debug_frame_arguments` decode
 the current frame's locals and arguments. Primitives are read via
 `ReadGenericValue` + `BitConverter`; strings via `ICorDebugStringValue`;
 references surface as `{address, typeName}` so the caller can drill
-down with `debug_heap_*` from there. Pass `frameIndex` to inspect a
-deeper frame on the pause-thread.
+down with `debug_heap_*` from there. Value-type (struct) slots are
+decoded in place (see **Struct decoding** below) instead of surfacing as
+a raw address. Pass `frameIndex` to inspect a deeper frame on the
+pause-thread.
 
 Slot probing no longer stops at the first empty slot: a value the JIT
 optimized away (or not yet in scope) is reported as `{kind:"unavailable"}`
@@ -281,6 +308,58 @@ arguments and locals that come after it.
 element-by-element (paged via `offset` / `count`): primitives decoded,
 reference elements as `{address, type}`, strings as text, nulls as null —
 the missing piece for stepping through a collection's contents.
+
+### Expression evaluation (`debug_eval`)
+
+`debug_eval` reads a value expression against the paused frame **without
+running any target code**:
+
+```
+debug_eval(expr="arg0")              # the receiver/first arg as {kind:object,...}
+debug_eval(expr="this.Entity")       # 'this' == arg0 on instance methods
+debug_eval(expr="arg1.Owner.Name")   # multi-level field / auto-property path
+debug_eval(expr="local0.UId")        # Guid leaf -> decoded text
+```
+
+The root is `arg<i>`, `local<i>`, or `this`; the rest is a dotted path. Each
+hop is a field or auto-property (property names resolve their
+`<Name>k__BackingField`), read from the dereferenced object via ClrMD — a
+passive memory read. Leaves are decoded the same way the heap reader decodes
+fields (primitives, strings, Guid/DateTime/enum/struct); an object leaf comes
+back as `{kind:object,type,address}` so you can drill in with
+`debug_heap_read_object`.
+
+This is **not** func-eval: calling methods or computed properties
+(`.ToString()`, `GetValue(...)`) is rejected on purpose. Driving
+`ICorDebugEval` on a live IIS/w3wp worker can deadlock or corrupt it if another
+thread holds a lock at the eval point, so the read-only object-graph walk is
+the safe subset — which already covers most "what's actually in this object"
+questions. Missing fields and null hops come back as structured
+`{kind:"error"|"null"}` rather than throwing.
+
+---
+
+## Struct decoding
+
+Value types no longer surface as an opaque `<Struct>` placeholder. Across
+`debug_heap_read_object` (fields), `debug_heap_read_array` (elements) and the
+frame readers (struct locals/arguments), a shared decoder resolves:
+
+```
+System.Guid            -> {kind:"Guid",     value:"0c81...-..."}
+System.DateTime        -> {kind:"DateTime", value:"2026-06-26T07:27:56.95Z"}  (ISO-8601)
+System.TimeSpan        -> {kind:"TimeSpan", value:"..."}
+System.DateTimeOffset  -> {kind:"DateTimeOffset", value:"...±..."}
+System.Decimal         -> {kind:"decimal",  value:"..."}
+<any enum>             -> {kind:"enum", type:"...", value:N, name:"Member"}
+<other struct>         -> {kind:"struct", type:"...", fields:[...]}   (one level of fields)
+```
+
+Well-known BCL structs are read straight off target memory as the real .NET
+type (their layout is a fixed unmanaged blob). Enums map the underlying number
+to the member name. Any other struct is expanded one level into its fields, so
+e.g. an entity's `UId`/`_modifiedOnUtc` come back as real values rather than
+`<Struct>`.
 
 ---
 

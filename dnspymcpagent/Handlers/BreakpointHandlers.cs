@@ -13,7 +13,7 @@ public static class BreakpointHandlers
     public static void Register(Dispatcher d)
     {
         d.Register("bp.set_il",
-            "[DEBUG] Set an IL-offset breakpoint. Params: {modulePath:string, token:uint, offset?:uint=0, condition?:string}. modulePath matches DnModule.Name suffix (case-insensitive). condition format: `count <op> N` (op: ==/!=/>=/<=/>/<). Example: \"count >= 5\" pauses on the 5th hit and every hit after.",
+            "[DEBUG] Set an IL-offset breakpoint. Params: {modulePath:string, token:uint, offset?:uint=0, condition?:string}. modulePath matches DnModule.Name suffix (case-insensitive). condition (op: ==/!=/>=/<=/>/<) is one of: `count <op> N` — pause on the Nth hit onward (e.g. \"count >= 5\"); or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame at the hit. Literals: integer (dec or 0x-hex), true/false, null, or a quoted string. Guid/DateTime fields compare by text and enums by member name, so e.g. \"arg0.UId == '0c81...'\", \"local1 > 100\", \"arg1.Name != null\".",
             p => Program.Session.OnDbg(() =>
             {
                 var modulePath = Dispatcher.Req<string>(p, "modulePath");
@@ -25,7 +25,7 @@ public static class BreakpointHandlers
                     ?? throw new ArgumentException($"module not found: {modulePath}");
 
                 var entryRef = new BreakpointEntryRef();
-                var cond = BuildCountCondition(condition, entryRef);
+                var cond = BuildCondition(condition, entryRef);
                 var bp = Program.Session.DnDebugger.CreateBreakpoint(mod.DnModuleId, token, offset, cond);
                 var entry = Program.Session.Breakpoints.Add(
                     "il",
@@ -37,7 +37,7 @@ public static class BreakpointHandlers
             }));
 
         d.Register("bp.set_by_name",
-            "[DEBUG] Set a breakpoint at IL=0 of a method identified by type and method name. Params: {modulePath:string, typeFullName:string, methodName:string, overloadIndex?:int=0, condition?:string}. condition format: `count <op> N` (op: ==/!=/>=/<=/>/<). Example: \"count >= 5\" pauses on the 5th hit and beyond.",
+            "[DEBUG] Set a breakpoint at IL=0 of a method identified by type and method name. Params: {modulePath:string, typeFullName:string, methodName:string, overloadIndex?:int=0, condition?:string}. condition (op: ==/!=/>=/<=/>/<) is one of: `count <op> N` — pause on the Nth hit onward (e.g. \"count >= 5\"); or a value gate `arg<i>[.field...] <op> lit` / `local<i>[.field...] <op> lit` evaluated against the frame (arg0 is the receiver 'this' on instance methods). Literals: integer (dec or 0x-hex), true/false, null, or quoted string. Guid/DateTime fields compare by text, enums by member name — e.g. \"arg0.Id == '0c81...'\", \"arg1 >= 10\", \"arg2.Name == 'Contact'\".",
             p => Program.Session.OnDbg(() =>
             {
                 var modulePath = Dispatcher.Req<string>(p, "modulePath");
@@ -57,7 +57,7 @@ public static class BreakpointHandlers
                 if (methodToken == 0) throw new ArgumentException($"method not found: {typeFullName}::{methodName} (overload {overloadIndex})");
 
                 var entryRef = new BreakpointEntryRef();
-                var cond = BuildCountCondition(condition, entryRef);
+                var cond = BuildCondition(condition, entryRef);
                 var bp = Program.Session.DnDebugger.CreateBreakpoint(mod.DnModuleId, methodToken, 0, cond);
                 var entry = Program.Session.Breakpoints.Add(
                     "by_name",
@@ -147,52 +147,27 @@ public static class BreakpointHandlers
     private sealed class BreakpointEntryRef { public Services.BreakpointEntry? Entry; }
 
     /// <summary>
-    /// Parse a "count &lt;op&gt; N" condition string into an ICorDebug
-    /// breakpoint-condition callback. Returns null when condition is null
-    /// or whitespace (use unconditional BP).
+    /// Compile a condition string into an ICorDebug breakpoint-condition
+    /// callback. Returns null when condition is null/whitespace (unconditional
+    /// BP). Delegates parsing to <see cref="ConditionEvaluator"/>, which
+    /// supports both `count &lt;op&gt; N` hit-count gates and
+    /// `arg&lt;i&gt;[.field…]/local&lt;i&gt;[.field…] &lt;op&gt; literal` value
+    /// comparisons. A malformed condition throws here (at set time) so the
+    /// error surfaces in the bp.set_* response.
     ///
-    /// Supported ops: ==, !=, &gt;=, &lt;=, &gt;, &lt;.
-    ///
-    /// The callback Interlocked.Increments the entry's HitCount on every
-    /// firing — so HitCount is the total number of times the instruction
-    /// was hit, regardless of how many of those triggered an actual pause.
+    /// The callback Interlocked.Increments the entry's HitCount on every firing
+    /// — so HitCount is the total number of times the instruction was hit,
+    /// regardless of how many of those triggered an actual pause.
     /// </summary>
-    private static Func<dndbg.Engine.ILCodeBreakpointConditionContext, bool>? BuildCountCondition(string? condition, BreakpointEntryRef entryRef)
+    private static Func<dndbg.Engine.ILCodeBreakpointConditionContext, bool>? BuildCondition(string? condition, BreakpointEntryRef entryRef)
     {
         if (string.IsNullOrWhiteSpace(condition)) return null;
-        var parsed = ParseCountCondition(condition);
+        var predicate = ConditionEvaluator.Compile(condition!);
         return ctx =>
         {
             var entry = entryRef.Entry;
-            if (entry == null) return true;  // entry not yet linked (race) — pause as fallback
-            int n = System.Threading.Interlocked.Increment(ref entry.HitCount);
-            return parsed(n);
-        };
-    }
-
-    private static Func<int, bool> ParseCountCondition(string raw)
-    {
-        // Tokenize: "count" identifier + operator + integer. Whitespace ignored.
-        var s = raw.Trim();
-        if (!s.StartsWith("count", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException($"unsupported condition '{raw}': must start with 'count'. Supported: 'count <op> N' where op is ==/!=/>=/<=/>/<");
-        s = s.Substring(5).TrimStart();
-        string[] ops = new[] { ">=", "<=", "==", "!=", ">", "<" };
-        string? hitOp = null;
-        foreach (var op in ops) { if (s.StartsWith(op)) { hitOp = op; s = s.Substring(op.Length).TrimStart(); break; } }
-        if (hitOp == null)
-            throw new ArgumentException($"unsupported condition '{raw}': missing comparison operator");
-        if (!int.TryParse(s, out var n))
-            throw new ArgumentException($"unsupported condition '{raw}': right-hand side must be an integer");
-        return hitOp switch
-        {
-            ">=" => x => x >= n,
-            "<=" => x => x <= n,
-            "==" => x => x == n,
-            "!=" => x => x != n,
-            ">"  => x => x > n,
-            "<"  => x => x < n,
-            _    => throw new ArgumentException($"unsupported operator '{hitOp}'"),
+            int n = entry == null ? 1 : System.Threading.Interlocked.Increment(ref entry.HitCount);
+            return predicate(n, ctx);
         };
     }
 
@@ -291,7 +266,7 @@ public static class BreakpointHandlers
         if (methodToken == 0) throw new ArgumentException($"method not found: {typeFullName}::{methodName} (overload {overloadIndex})");
 
         var entryRef = new BreakpointEntryRef();
-        var cond = BuildCountCondition(condition, entryRef);
+        var cond = BuildCondition(condition, entryRef);
         var bp = Program.Session.DnDebugger.CreateBreakpoint(mod.DnModuleId, methodToken, 0, cond);
         var entry = Program.Session.Breakpoints.Add("by_name",
             $"{typeFullName}::{methodName} [token=0x{methodToken:X8}]", bp);
@@ -309,7 +284,7 @@ public static class BreakpointHandlers
 
         var mod = FindModule(modulePath) ?? throw new ArgumentException($"module not found: {modulePath}");
         var entryRef = new BreakpointEntryRef();
-        var cond = BuildCountCondition(condition, entryRef);
+        var cond = BuildCondition(condition, entryRef);
         var bp = Program.Session.DnDebugger.CreateBreakpoint(mod.DnModuleId, token, offset, cond);
         var entry = Program.Session.Breakpoints.Add("il",
             $"IL bp {Path.GetFileName(mod.Name)}!0x{token:X8}+{offset}", bp);

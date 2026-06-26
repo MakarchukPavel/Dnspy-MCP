@@ -32,6 +32,7 @@ internal static class Program
         MemoryHandlers.Register(Dispatcher);
         FrameHandlers.Register(Dispatcher);
         ExceptionHandlers.Register(Dispatcher);
+        EvalHandlers.Register(Dispatcher);
 
         // The agent boots in "no target" mode and waits for an MCP-driven
         // debug_pid_attach (session.attach RPC) to bind to a PID.

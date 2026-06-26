@@ -51,17 +51,23 @@ public static class HeapHandlers
                     {
                         if (f.IsObjectReference) val = $"0x{obj.ReadObjectField(f.Name).Address:X}";
                         else if (f.ElementType == ClrElementType.String) val = obj.ReadStringField(f.Name);
-                        else if (f.ElementType == ClrElementType.Int32) val = obj.ReadField<int>(f.Name);
-                        else if (f.ElementType == ClrElementType.UInt32) val = obj.ReadField<uint>(f.Name);
-                        else if (f.ElementType == ClrElementType.Int64) val = obj.ReadField<long>(f.Name);
-                        else if (f.ElementType == ClrElementType.UInt64) val = obj.ReadField<ulong>(f.Name);
+                        else if (f.ElementType == ClrElementType.Int32) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<int>(f.Name));
+                        else if (f.ElementType == ClrElementType.UInt32) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<uint>(f.Name));
+                        else if (f.ElementType == ClrElementType.Int64) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<long>(f.Name));
+                        else if (f.ElementType == ClrElementType.UInt64) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<ulong>(f.Name));
                         else if (f.ElementType == ClrElementType.Boolean) val = obj.ReadField<bool>(f.Name);
-                        else if (f.ElementType == ClrElementType.Int16) val = obj.ReadField<short>(f.Name);
-                        else if (f.ElementType == ClrElementType.UInt16) val = obj.ReadField<ushort>(f.Name);
-                        else if (f.ElementType == ClrElementType.Int8) val = obj.ReadField<sbyte>(f.Name);
-                        else if (f.ElementType == ClrElementType.UInt8) val = obj.ReadField<byte>(f.Name);
+                        else if (f.ElementType == ClrElementType.Char) val = (int)obj.ReadField<char>(f.Name);
+                        else if (f.ElementType == ClrElementType.Int16) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<short>(f.Name));
+                        else if (f.ElementType == ClrElementType.UInt16) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<ushort>(f.Name));
+                        else if (f.ElementType == ClrElementType.Int8) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<sbyte>(f.Name));
+                        else if (f.ElementType == ClrElementType.UInt8) val = ClrStructDecoder.DecorateEnum(f.Type, obj.ReadField<byte>(f.Name));
+                        else if (f.ElementType == ClrElementType.Float) val = obj.ReadField<float>(f.Name);
+                        else if (f.ElementType == ClrElementType.Double) val = obj.ReadField<double>(f.Name);
                         else if (f.ElementType == ClrElementType.NativeInt) val = obj.ReadField<long>(f.Name);
                         else if (f.ElementType == ClrElementType.Pointer) val = obj.ReadField<long>(f.Name);
+                        // Value-type (struct) field: decode Guid/DateTime/enum/decimal or expand fields
+                        // instead of the old "<Struct>" placeholder.
+                        else if (f.IsValueType) val = ClrStructDecoder.DecodeValueType(obj.ReadValueTypeField(f.Name));
                         else val = $"<{f.ElementType}>";
                     }
                     catch (Exception ex) { val = $"<read error: {ex.Message}>"; }
@@ -131,7 +137,16 @@ public static class HeapHandlers
                                 case ClrElementType.Double:   val = arr.GetValue<double>(i); break;
                                 case ClrElementType.NativeInt: val = arr.GetValue<long>(i); break;
                                 case ClrElementType.Pointer:   val = arr.GetValue<long>(i); break;
-                                default: val = $"<{et}>"; break; // struct/value-type elements: inspect via element fields
+                                default:
+                                    // Struct / value-type elements (incl. enums): decode in place from the
+                                    // element address instead of emitting "<Struct>".
+                                    if (comp != null && (et == ClrElementType.Struct || comp.IsValueType))
+                                    {
+                                        var elemAddr = obj.Type.GetArrayElementAddress(address, i);
+                                        val = ClrStructDecoder.DecodeByAddress(elemAddr, comp.Name, comp);
+                                    }
+                                    else val = $"<{et}>";
+                                    break;
                             }
                         }
                     }
