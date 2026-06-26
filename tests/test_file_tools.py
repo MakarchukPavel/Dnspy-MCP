@@ -200,6 +200,88 @@ def test_reverse_il_method_by_token(mcp, asm):
     assert any(i["opCode"] == "ret" for i in r["items"])
 
 
+def _require_tool(mcp, name: str):
+    if name not in {t["name"] for t in mcp.list_tools()}:
+        pytest.skip(f"{name} not in this MCP host build (rebuild dist via builder.ps1)")
+
+
+def test_reverse_method_line_map(mcp, asm):
+    _require_tool(mcp, "reverse_method_line_map")
+    r = mcp.call_json("reverse_method_line_map",
+                      {"asmPath": asm,
+                       "typeFullName": "DnSpyMcp.TestTarget.Program",
+                       "methodName": "Multiply"})
+    assert r["token"] > 0 and r["method"] == "Multiply"
+    sts = r["statements"]
+    assert len(sts) >= 4
+    # Sorted by IL offset, spans are well-formed, and the loop body / return map.
+    assert sts == sorted(sts, key=lambda s: s["ilOffset"])
+    assert all(s["ilEnd"] >= s["ilOffset"] for s in sts)
+    assert any("num += a" in s["text"] for s in sts)
+    assert any("return num" in s["text"] for s in sts)
+    # Every statement carries the function it belongs to.
+    assert all(s["functionToken"] == r["token"] for s in sts)
+
+
+def test_reverse_method_line_map_by_token(mcp, asm):
+    """Same map resolvable by raw method-def token — what a paused frame reports."""
+    _require_tool(mcp, "reverse_method_line_map")
+    by_name = mcp.call_json("reverse_method_line_map",
+                            {"asmPath": asm,
+                             "typeFullName": "DnSpyMcp.TestTarget.Program",
+                             "methodName": "Multiply"})
+    by_tok = mcp.call_json("reverse_method_line_map",
+                           {"asmPath": asm, "token": str(by_name["token"])})
+    assert by_tok["method"] == "Multiply"
+    assert by_tok["count"] == by_name["count"]
+
+
+def test_reverse_method_line_map_lambda_function_token(mcp, asm):
+    """A method containing a lambda emits >1 function token; each statement is tagged."""
+    _require_tool(mcp, "reverse_method_line_map")
+    r = mcp.call_json("reverse_method_line_map",
+                      {"asmPath": asm,
+                       "typeFullName": "DnSpyMcp.TestTarget.Program",
+                       "methodName": "Main"})
+    tokens = {s["functionToken"] for s in r["statements"]}
+    # Main itself plus the CancelKeyPress lambda body => at least two functions.
+    assert len(tokens) >= 2
+    assert r["token"] in tokens
+
+
+def test_reverse_source_at_il(mcp, asm):
+    """IL offset -> source statement: the 'where am I paused' direction."""
+    _require_tool(mcp, "reverse_source_at_il")
+    mp = mcp.call_json("reverse_method_line_map",
+                       {"asmPath": asm,
+                        "typeFullName": "DnSpyMcp.TestTarget.Program",
+                        "methodName": "Multiply"})
+    body = next(s for s in mp["statements"] if "num += a" in s["text"])
+    # An offset strictly inside the body span maps back to that statement, exact=True.
+    mid = body["ilOffset"] + max(1, (body["ilEnd"] - body["ilOffset"]) // 2)
+    r = mcp.call_json("reverse_source_at_il",
+                      {"asmPath": asm, "token": str(mp["token"]), "ilOffset": mid})
+    assert r["match"] is not None
+    assert "num += a" in r["match"]["text"]
+    assert r["match"]["exact"] is True
+    assert any(w["current"] for w in r["window"])
+
+
+def test_reverse_il_at_source_line(mcp, asm):
+    """Source line -> IL offset: the input for debug_bp_set_il (break at line N)."""
+    _require_tool(mcp, "reverse_il_at_source_line")
+    mp = mcp.call_json("reverse_method_line_map",
+                       {"asmPath": asm,
+                        "typeFullName": "DnSpyMcp.TestTarget.Program",
+                        "methodName": "Multiply"})
+    target = next(s for s in mp["statements"] if "return num" in s["text"])
+    r = mcp.call_json("reverse_il_at_source_line",
+                      {"asmPath": asm, "token": str(mp["token"]), "line": target["line"]})
+    assert r["match"] is not None
+    assert r["match"]["ilOffset"] == target["ilOffset"]
+    assert "return num" in r["match"]["text"]
+
+
 def test_reverse_find_string(mcp, asm):
     r = mcp.call_json("reverse_find_string", {"asmPath": asm, "needle": "widget-"})
     assert r["returned"] >= 1

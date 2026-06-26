@@ -8,6 +8,9 @@ using DnSpyMcp.Services;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 using dnSpy.Analyzer.TreeNodes;
+using ICSharpCode.Decompiler.CSharp.OutputVisitor;
+using ICSharpCode.Decompiler.DebugInfo;
+using ICSharpCode.Decompiler.IL;
 using ICSharpCode.Decompiler.TypeSystem;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
@@ -304,6 +307,166 @@ public static class AsmFileTools
         var handle = MetadataTokens.MethodDefinitionHandle((int)m.MDToken.Rid);
         var full = a.Decompiler.DecompileAsString(handle);
         return Paging.ClampText(full, offsetChars, maxChars);
+    }
+
+    [McpServerTool(Name = "reverse_method_line_map")]
+    [Description("[REVERSE] Map a method's IL offsets <-> decompiled C# source lines (sequence points) — the bridge that makes the live debugger source-aware: translate a paused frame's ilOffset to a source line, or a source line to the IL offset to feed debug_bp_set_il. Identify the method EITHER by token (decimal/hex method-def token — e.g. the 'token' a paused frame reports in debug_thread_stack) OR by typeFullName+methodName (overload via signature OR overloadIndex, like reverse_decompile_method). Params: token? OR (typeFullName?, methodName?), asmPath?, signature?, overloadIndex?, includeHidden=false (compiler 0xFEEFEE points). Returns {token, type, method, count, statements:[{functionToken, ilOffset, ilEnd, line, endLine, col, isHidden, text}]} ordered by ilOffset. Lambdas/local-functions/async state machines emit several functions — each statement carries its functionToken (a frame paused in an async MoveNext reports that nested token).")]
+    public static object MethodLineMap(Workspace ws, string? typeFullName = null, string? methodName = null,
+                                       string? token = null, string? asmPath = null, string? signature = null,
+                                       int? overloadIndex = null, bool includeHidden = false)
+    {
+        var a = ws.Get(asmPath);
+        var m = ResolveMethodFlexible(a, typeFullName, methodName, token, signature, overloadIndex);
+        var rows = BuildLineMap(ws, a, m, includeHidden);
+        var statements = rows.Select(r => new
+        {
+            r.functionToken, r.ilOffset, r.ilEnd, r.line, r.endLine, r.col, r.isHidden, r.text,
+        }).ToList();
+        return new { token = (long)m.MDToken.Raw, type = m.DeclaringType?.FullName, method = m.Name.String, count = statements.Count, statements };
+    }
+
+    [McpServerTool(Name = "reverse_source_at_il")]
+    [Description("[REVERSE] Translate a live frame's IL offset to its C# source statement — feed it {token, ilOffset} straight from a paused frame (debug_thread_stack). Finds the sequence point whose [ilOffset,ilEnd) span contains the given offset (the JIT IP). Identify the method by token OR typeFullName+methodName. Params: ilOffset (required, decimal or hex), token? OR (typeFullName?, methodName?, signature?, overloadIndex?), asmPath?, context=2 (how many neighbouring statements to include each side). Returns {token, method, ilOffset, match:{ilOffset, ilEnd, line, text, functionToken, exact}|null, window:[...]}; match.exact=false when the offset falls between sequence points (mapped to the nearest preceding one).")]
+    public static object SourceAtIl(Workspace ws, int ilOffset, string? token = null, string? typeFullName = null,
+                                    string? methodName = null, string? signature = null, int? overloadIndex = null,
+                                    string? asmPath = null, int context = 2)
+    {
+        var a = ws.Get(asmPath);
+        var m = ResolveMethodFlexible(a, typeFullName, methodName, token, signature, overloadIndex);
+        var rows = BuildLineMap(ws, a, m, includeHidden: false);
+        if (rows.Count == 0)
+            return new { token = (long)m.MDToken.Raw, method = m.Name.String, ilOffset, match = (object?)null, window = Array.Empty<object>() };
+
+        // Prefer a span that strictly contains the offset; otherwise fall back to
+        // the nearest sequence point at or before it (JIT IP can land mid-span).
+        int idx = -1; bool exact = false;
+        for (int i = 0; i < rows.Count; i++)
+            if (ilOffset >= rows[i].ilOffset && ilOffset < rows[i].ilEnd) { idx = i; exact = true; break; }
+        if (idx < 0)
+            for (int i = 0; i < rows.Count; i++)
+                if (rows[i].ilOffset <= ilOffset) idx = i; else break;
+        if (idx < 0) idx = 0;
+
+        var row = rows[idx];
+        int lo = Math.Max(0, idx - context), hi = Math.Min(rows.Count - 1, idx + context);
+        var window = new List<object>();
+        for (int i = lo; i <= hi; i++)
+            window.Add(new { rows[i].ilOffset, rows[i].ilEnd, rows[i].line, rows[i].text, rows[i].functionToken, current = i == idx });
+        return new
+        {
+            token = (long)m.MDToken.Raw,
+            method = m.Name.String,
+            ilOffset,
+            match = new { row.ilOffset, row.ilEnd, row.line, row.text, row.functionToken, exact },
+            window,
+        };
+    }
+
+    [McpServerTool(Name = "reverse_il_at_source_line")]
+    [Description("[REVERSE] Translate a decompiled C# source line to the IL offset to set a breakpoint on — the input for debug_bp_set_il. Lines are 1-based into the SAME decompiled text reverse_decompile_method / reverse_method_line_map render (NOT the original .cs). Returns the first non-hidden sequence point on that line, or the next line at/after it that has one. Identify the method by token OR typeFullName+methodName. Params: line (required, 1-based), token? OR (typeFullName?, methodName?, signature?, overloadIndex?), asmPath?. Returns {token, method, requestedLine, match:{ilOffset, ilEnd, line, text, functionToken}|null, candidatesOnLine:[...]}; match=null when no sequence point exists at/after the line (e.g. a brace-only or declaration line).")]
+    public static object IlAtSourceLine(Workspace ws, int line, string? token = null, string? typeFullName = null,
+                                        string? methodName = null, string? signature = null, int? overloadIndex = null,
+                                        string? asmPath = null)
+    {
+        var a = ws.Get(asmPath);
+        var m = ResolveMethodFlexible(a, typeFullName, methodName, token, signature, overloadIndex);
+        var rows = BuildLineMap(ws, a, m, includeHidden: false);
+        var onLine = rows.Where(r => r.line == line).OrderBy(r => r.ilOffset).ToList();
+        // Exact line first; else the closest following line that carries a point.
+        var pick = onLine.FirstOrDefault()
+                   ?? rows.Where(r => r.line > line).OrderBy(r => r.line).ThenBy(r => r.ilOffset).FirstOrDefault();
+        return new
+        {
+            token = (long)m.MDToken.Raw,
+            method = m.Name.String,
+            requestedLine = line,
+            match = pick == null ? null : new { pick.ilOffset, pick.ilEnd, pick.line, pick.text, pick.functionToken },
+            candidatesOnLine = onLine.Select(r => new { r.ilOffset, r.ilEnd, r.line, r.text, r.functionToken }).ToList(),
+        };
+    }
+
+    /// <summary>A single statement-level sequence point: an IL span mapped to a decompiled-source span.</summary>
+    private sealed class StmtRow
+    {
+        public long? functionToken;
+        public int ilOffset, ilEnd, line, endLine, col;
+        public bool isHidden;
+        public string text = "";
+    }
+
+    /// <summary>Resolve a method by raw metadata token if supplied, else by type+method (with overload selection).</summary>
+    private static MethodDef ResolveMethodFlexible(Workspace.OpenedAsm a, string? typeFullName, string? methodName,
+                                                   string? token, string? signature, int? overloadIndex)
+    {
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            var tok = Numbers.ParseUInt32(token!, "token");
+            return a.Module.ResolveToken(tok) as MethodDef
+                ?? throw new McpException($"method not found for token 0x{tok:X8}");
+        }
+        if (string.IsNullOrWhiteSpace(typeFullName) || string.IsNullOrWhiteSpace(methodName))
+            throw new McpException("supply either 'token' or both 'typeFullName' and 'methodName'");
+        return ResolveOverload(a.Module, typeFullName!, methodName!, signature, overloadIndex);
+    }
+
+    /// <summary>Decompile a method and project its sequence points onto the freshly-rendered source text, sorted by IL offset.</summary>
+    private static List<StmtRow> BuildLineMap(Workspace ws, Workspace.OpenedAsm a, MethodDef m, bool includeHidden)
+    {
+        var handle = MetadataTokens.MethodDefinitionHandle((int)m.MDToken.Rid);
+
+        // Decompile to a SyntaxTree, then render it with a writer that stamps
+        // Start/End locations onto every AstNode — CreateSequencePoints reads
+        // those, so DecompileAsString (which doesn't stamp) yields no mapping.
+        var tree = a.Decompiler.Decompile(handle);
+        var sw = new System.IO.StringWriter();
+        tree.AcceptVisitor(new CSharpOutputVisitor(TokenWriter.CreateWriterThatSetsLocationsInAST(sw, "\t"), ws.Settings.CSharpFormattingOptions));
+        var lines = sw.ToString().Replace("\r\n", "\n").Split('\n');
+
+        var seqByFunc = a.Decompiler.CreateSequencePoints(tree);
+        var rows = new List<StmtRow>();
+        foreach (var kv in seqByFunc)
+        {
+            long? funcToken = null;
+            try { funcToken = MetadataTokens.GetToken(kv.Key.Method.MetadataToken); } catch { }
+            foreach (var sp in kv.Value)
+            {
+                if (sp.IsHidden && !includeHidden) continue;
+                rows.Add(new StmtRow
+                {
+                    functionToken = funcToken,
+                    ilOffset = sp.Offset,
+                    ilEnd = sp.EndOffset,
+                    line = sp.StartLine,
+                    endLine = sp.EndLine,
+                    col = sp.StartColumn,
+                    isHidden = sp.IsHidden,
+                    text = SliceSource(lines, sp.StartLine, sp.StartColumn, sp.EndLine, sp.EndColumn),
+                });
+            }
+        }
+        rows.Sort((x, y) => x.ilOffset.CompareTo(y.ilOffset));
+        return rows;
+    }
+
+    /// <summary>Extract the source text for a sequence point's [startLine,startCol]..[endLine,endCol] span (1-based).</summary>
+    private static string SliceSource(string[] lines, int startLine, int startCol, int endLine, int endCol)
+    {
+        try
+        {
+            if (startLine < 1 || startLine > lines.Length) return "";
+            if (endLine < startLine) endLine = startLine;
+            if (endLine > lines.Length) endLine = lines.Length;
+            if (startLine == endLine)
+            {
+                var ln = lines[startLine - 1];
+                int s = Math.Max(0, startCol - 1), e = Math.Min(ln.Length, endCol - 1);
+                return e > s ? ln.Substring(s, e - s).Trim() : ln.Trim();
+            }
+            var sb = new StringBuilder();
+            for (int i = startLine; i <= endLine; i++) { sb.Append(lines[i - 1].Trim()); if (i < endLine) sb.Append(' '); }
+            return sb.ToString().Trim();
+        }
+        catch { return ""; }
     }
 
     [McpServerTool(Name = "reverse_decompile_property")]

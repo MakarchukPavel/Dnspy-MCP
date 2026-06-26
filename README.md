@@ -91,6 +91,11 @@ reverse_decompile_type   / reverse_decompile_method
 reverse_decompile_property / reverse_decompile_event / reverse_decompile_field
 reverse_il_method        / reverse_il_method_by_token
 
+# source <-> IL mapping (sequence points — makes the live debugger source-aware)
+reverse_method_line_map        # IL offsets <-> decompiled C# lines (by type+method OR raw token)
+reverse_source_at_il           # paused frame {token, ilOffset} -> the C# statement (where am I?)
+reverse_il_at_source_line      # decompiled C# line -> IL offset to feed debug_bp_set_il
+
 # search
 reverse_find_string                      # cross-DLL ldstr index, regex optional
 
@@ -314,6 +319,45 @@ arguments and locals that come after it.
 element-by-element (paged via `offset` / `count`): primitives decoded,
 reference elements as `{address, type}`, strings as text, nulls as null —
 the missing piece for stepping through a collection's contents.
+
+### Source-aware debugging (source ↔ IL)
+
+ICorDebug works in *IL offsets*; humans work in *source lines*. The
+`reverse_method_line_map` family bridges the two using the decompiler's
+sequence points, so a paused IL offset can be shown as a C# statement and a
+breakpoint can be placed by source line. These are `reverse_*` (on-disk) tools
+— they need an opened assembly (`reverse_open`) but **not** a live agent, so
+the mapping works against a dump, a Release build, or before attaching.
+
+The lines are 1-based into the **decompiled** text (the same text
+`reverse_decompile_method` / `reverse_method_line_map` render), not the
+original `.cs`. A method with lambdas / local functions / an async state
+machine decompiles into several IL functions; every statement carries its
+`functionToken`, and a frame paused inside a lambda or `MoveNext` reports that
+nested token — so resolution by `token` lands on the right body.
+
+**Where am I paused?** — frame → source statement:
+
+```
+top = debug_thread_stack(...).frames[0]          # -> {token, ilOffset, ...}
+reverse_source_at_il(token=top.token, ilOffset=top.ilOffset)
+   -> match:{line, text, ilEnd, exact}, window:[±2 neighbouring statements]
+```
+
+`exact=false` means the IP fell between sequence points and was mapped to the
+nearest preceding one.
+
+**Break at line N** — source line → IL offset → breakpoint:
+
+```
+hit = reverse_il_at_source_line(typeFullName=..., methodName=..., line=37)
+debug_bp_set_il(... ilOffset=hit.match.ilOffset)   # exact IL the JIT will stop on
+```
+
+`reverse_method_line_map` returns the full table when you want to see every
+statement at once; both directional tools accept either `token` (what a frame
+reports) or `typeFullName`+`methodName` (with the usual `signature` /
+`overloadIndex` overload selector).
 
 ### Expression evaluation (`debug_eval`)
 
