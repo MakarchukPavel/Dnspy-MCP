@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using dndbg.Engine;
 using DnSpyMcp.Agent.Services;
 
@@ -16,7 +17,7 @@ public static class ExceptionHandlers
     public static void Register(Dispatcher d)
     {
         d.Register("exception.break_set",
-            "[DEBUG] Arm managed-exception interception: pause the target when an exception is thrown. Params: {mode:\"all\"|\"unhandled\"|\"by_type\", typeName?:string (by_type; substring/FQN, case-insensitive), firstChance?:bool=true}. mode=all pauses on EVERY first-chance throw (NOISY on busy apps like IIS/Creatio); mode=unhandled only on unhandled; mode=by_type only when the thrown type name matches. Catch the pause with debug_wait_paused (returns exceptionHit). Idempotent.",
+            "[DEBUG] Arm managed-exception interception: pause the target when an exception is thrown. Params: {mode:\"all\"|\"unhandled\"|\"by_type\", typeName?:string (by_type; substring/FQN, case-insensitive), firstChance?:bool=true, excludeTypes?:string (comma/semicolon-separated type-name substrings to ignore)}. mode=all pauses on every first-chance throw; mode=unhandled only on unhandled; mode=by_type only when the thrown type matches. WORKFLOW for an unknown bug amid noise: arm mode=all, then exception.ignore_add each noisy type as it appears until debug_wait_paused goes quiet, then reproduce. excludeTypes seeds the ignore list up front. Catch the pause with debug_wait_paused (returns exceptionHit). Idempotent.",
             p =>
             {
                 if (!Program.Session.IsAttached) throw new InvalidOperationException("not attached");
@@ -27,14 +28,16 @@ public static class ExceptionHandlers
                 var firstChance = Dispatcher.Opt<bool>(p, "firstChance", true);
                 if (mode == "by_type" && string.IsNullOrWhiteSpace(typeName))
                     throw new ArgumentException("mode=by_type requires a typeName");
+                var excludeTypes = ParseList(Dispatcher.Opt<string?>(p, "excludeTypes", null));
 
                 Program.Session.ExceptionInterception = new DebuggerSession.ExceptionFilter
                 {
                     Mode = mode,
                     TypeName = string.IsNullOrWhiteSpace(typeName) ? null : typeName,
                     FirstChance = firstChance,
+                    ExcludeTypes = excludeTypes,
                 };
-                return new { armed = true, mode, typeName, firstChance };
+                return new { armed = true, mode, typeName, firstChance, excludeTypes };
             });
 
         d.Register("exception.break_clear",
@@ -44,6 +47,38 @@ public static class ExceptionHandlers
                 Program.Session.ExceptionInterception = null;
                 return new { armed = false };
             });
+
+        d.Register("exception.ignore_add",
+            "[DEBUG] Add a thrown-exception type to the active filter's ignore list — it stops pausing the target (filtered server-side, no round-trip per throw). Use under mode=all to drop noisy types one at a time until the background goes quiet, then reproduce the real issue. Substring match, case-insensitive. Params: {typeName:string}. Returns the updated ignore list.",
+            p =>
+            {
+                var typeName = (Dispatcher.Req<string>(p, "typeName") ?? string.Empty).Trim();
+                if (typeName.Length == 0) throw new ArgumentException("typeName is required");
+                var f = Program.Session.ExceptionInterception
+                    ?? throw new InvalidOperationException("no exception filter armed — call exception.break_set (debug_exception_break_set) first");
+                var cur = f.ExcludeTypes;
+                if (!cur.Any(x => string.Equals(x, typeName, StringComparison.OrdinalIgnoreCase)))
+                    f.ExcludeTypes = cur.Concat(new[] { typeName }).ToArray();
+                return new { ignored = f.ExcludeTypes };
+            });
+
+        d.Register("exception.ignore_clear",
+            "[DEBUG] Clear the active exception filter's ignore list (everything in scope pauses again). Returns {ignored:[]}.",
+            _ =>
+            {
+                var f = Program.Session.ExceptionInterception;
+                if (f != null) f.ExcludeTypes = Array.Empty<string>();
+                return new { ignored = Array.Empty<string>() };
+            });
+    }
+
+    private static string[] ParseList(string? csv)
+    {
+        if (string.IsNullOrWhiteSpace(csv)) return Array.Empty<string>();
+        return csv.Split(new[] { ',', ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+                  .Select(s => s.Trim())
+                  .Where(s => s.Length > 0)
+                  .ToArray();
     }
 
     /// <summary>

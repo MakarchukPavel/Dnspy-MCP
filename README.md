@@ -147,10 +147,13 @@ debug_bp_set_il / debug_bp_set_by_name / debug_bp_set_native
 debug_bp_list / debug_bp_delete / debug_bp_enable / debug_bp_disable
 
 # exception interception (break on a thrown managed exception)
-debug_exception_break_set    # mode: all | unhandled | by_type  (+ typeName, firstChance)
+debug_exception_break_set    # mode: all | unhandled | by_type  (+ typeName, firstChance, excludeTypes)
 debug_exception_break_clear
-# debug_wait_paused returns an exceptionHit block {type,message,hResult,unhandled,thread}
-# when an armed filter stops the target at a throw.
+debug_exception_ignore_add   # add a noisy type to the ignore list (filtered server-side)
+debug_exception_ignore_clear
+# debug_wait_paused returns an exceptionHit block {type,message,hResult,unhandled,thread}.
+# Unknown bug amid noise: arm mode=all, ignore_add each noisy type until wait_paused goes
+# quiet, then reproduce -> the real exception (not ignored) is the one that pauses.
 
 # heap (ClrMD)
 debug_heap_find_instances / debug_heap_read_object

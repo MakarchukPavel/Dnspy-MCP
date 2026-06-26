@@ -52,6 +52,10 @@ public sealed class DebuggerSession : IDisposable
         public string Mode = "by_type";   // all | unhandled | by_type
         public string? TypeName;          // by_type: substring / FQN, case-insensitive
         public bool FirstChance = true;   // all/by_type: stop at first-chance (true) else unhandled
+        // Type-name substrings to NEVER pause on (the "ignore the noise" list). Grown live by
+        // exception.ignore_add; replaced atomically (volatile) so the STA callback always reads
+        // a consistent immutable snapshot without locking.
+        public volatile string[] ExcludeTypes = System.Array.Empty<string>();
     }
 
     public DnDebugger DnDebugger =>
@@ -367,13 +371,29 @@ public sealed class DebuggerSession : IDisposable
             bool wantUnhandled = filter.Mode == "unhandled" || !filter.FirstChance;
             if (wantUnhandled ? !isUnhandled : !isFirst) return;
 
+            // Resolve the thrown type name once, only if we actually need it
+            // (by_type matching, or a non-empty ignore list).
+            var excludes = filter.ExcludeTypes;
+            string? exName = (filter.Mode == "by_type" || excludes.Length > 0)
+                ? TryGetExceptionTypeName(e2.CorThread?.CurrentException)
+                : null;
+
             if (filter.Mode == "by_type")
             {
-                var name = TryGetExceptionTypeName(e2.CorThread?.CurrentException);
-                if (name is null) return; // can't confirm the type -> don't pause
+                if (exName is null) return; // can't confirm the type -> don't pause
                 if (!string.IsNullOrEmpty(filter.TypeName) &&
-                    name.IndexOf(filter.TypeName, StringComparison.OrdinalIgnoreCase) < 0)
+                    exName.IndexOf(filter.TypeName, StringComparison.OrdinalIgnoreCase) < 0)
                     return;
+            }
+
+            // Ignore list (applies to every mode). This is what lets mode=all run at full
+            // speed once noisy types are ignored: the skip happens here on the STA thread,
+            // with NO MCP round-trip per noise throw.
+            if (exName != null && excludes.Length > 0)
+            {
+                foreach (var ex in excludes)
+                    if (!string.IsNullOrEmpty(ex) && exName.IndexOf(ex, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return;
             }
 
             e.AddPauseReason(isUnhandled ? DebuggerPauseReason.UnhandledException : DebuggerPauseReason.Exception);

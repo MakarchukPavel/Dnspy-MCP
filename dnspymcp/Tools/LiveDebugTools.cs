@@ -239,14 +239,24 @@ public static class LiveDebugTools
     // ---- exception interception -----------------------------------------
 
     [McpServerTool(Name = "debug_exception_break_set")]
-    [Description("[DEBUG] Arm managed-exception interception: pause the target when an exception is thrown. mode: all | unhandled | by_type. typeName (for by_type; substring or full name, case-insensitive). firstChance=true stops at the throw; false waits for unhandled. mode=all is NOISY on busy apps (IIS/Creatio throw many first-chance internally) — prefer by_type or unhandled. Catch the pause with debug_wait_paused (exceptionHit block: type/message/hResult/unhandled/thread). Params: mode='by_type', typeName?, firstChance=true.")]
-    public static object ExceptionBreakSet(AgentRegistry reg, string mode = "by_type", string? typeName = null, bool firstChance = true, string? agent = null)
-        => reg.Get(agent).Result("exception.break_set", new { mode, typeName, firstChance })!;
+    [Description("[DEBUG] Arm managed-exception interception: pause the target when an exception is thrown. mode: all | unhandled | by_type. typeName (for by_type; substring/full name, case-insensitive). firstChance=true stops at the throw; false waits for unhandled. excludeTypes: comma/semicolon-separated type-name substrings to IGNORE. WORKFLOW for an unknown bug amid noise (IIS/Creatio throw many first-chance internally): arm mode=all, then debug_exception_ignore_add each noisy type as it appears until debug_wait_paused goes quiet, then reproduce — the real exception (not ignored) pauses. Catch with debug_wait_paused (exceptionHit: type/message/hResult/unhandled/thread). Params: mode='by_type', typeName?, firstChance=true, excludeTypes?.")]
+    public static object ExceptionBreakSet(AgentRegistry reg, string mode = "by_type", string? typeName = null, bool firstChance = true, string? excludeTypes = null, string? agent = null)
+        => reg.Get(agent).Result("exception.break_set", new { mode, typeName, firstChance, excludeTypes })!;
 
     [McpServerTool(Name = "debug_exception_break_clear")]
     [Description("[DEBUG] Disarm exception interception (thrown exceptions no longer pause the target).")]
     public static object ExceptionBreakClear(AgentRegistry reg, string? agent = null)
         => reg.Get(agent).Result("exception.break_clear")!;
+
+    [McpServerTool(Name = "debug_exception_ignore_add")]
+    [Description("[DEBUG] Add a thrown-exception type to the active filter's ignore list so it no longer pauses the target (filtered server-side in the agent — no round-trip per throw). Under mode=all, call this for each noisy type as debug_wait_paused surfaces it, until the background goes quiet; then reproduce the real issue. Substring match, case-insensitive. Returns the updated ignore list. Params: typeName.")]
+    public static object ExceptionIgnoreAdd(AgentRegistry reg, string typeName, string? agent = null)
+        => reg.Get(agent).Result("exception.ignore_add", new { typeName })!;
+
+    [McpServerTool(Name = "debug_exception_ignore_clear")]
+    [Description("[DEBUG] Clear the active exception filter's ignore list (everything in scope pauses again).")]
+    public static object ExceptionIgnoreClear(AgentRegistry reg, string? agent = null)
+        => reg.Get(agent).Result("exception.ignore_clear")!;
 
     // ---- stepping -------------------------------------------------------
 
