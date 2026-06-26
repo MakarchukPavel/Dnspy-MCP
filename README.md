@@ -202,6 +202,28 @@ different `name`s to register several target agents.
 
 ---
 
+## Helper scripts (`scripts/`)
+
+Convenience launchers for this fork. They are **portable** — each resolves
+paths relative to its own location (`%~dp0`), so they work wherever the repo
+is cloned, no editing required.
+
+| Script | What it does |
+|--------|--------------|
+| `build-full.bat` | `builder.ps1` — full build (dnSpy subset + both agents + host). |
+| `build-fast.bat` | `builder.ps1 -SkipDnSpy` — fast rebuild, reuses `lib/`. |
+| `register-claude-code.bat` | Idempotently registers the built host with Claude Code (`claude mcp add`). Safe to re-run. |
+| `start-agent.bat` | Starts the **x64** agent on `127.0.0.1:5555`. |
+| `start-agent-x86.bat` | Starts the **x86** agent on `127.0.0.1:5556` (for 32-bit targets). |
+
+Typical flow: `build-fast.bat` → `register-claude-code.bat` (once) → restart
+Claude Code → `start-agent.bat` (or `-x86` for a 32-bit target) → connect with
+`debug_session_connect(port=5555|5556)`. The debugger bitness must match the
+target's. Stop the agent and close Claude Code before rebuilding — the running
+`dist\*.exe` are otherwise locked.
+
+---
+
 ## Conditional breakpoints (D2)
 
 `debug_bp_set_by_name` and `debug_bp_set_il` accept an optional
