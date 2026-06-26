@@ -338,6 +338,88 @@ public static class HeapHandlers
                     referrers,
                 };
             });
+
+        d.Register("heap.roots",
+            "[DEBUG] Enumerate GC roots — the anchors that keep objects alive: GC handles (Strong/Pinned/Weak/Dependent/AsyncPinned/RefCounted/SizedRef), stack locals of live threads, and the finalizer queue. The starting point for leak analysis: a growing StrongHandle count = a handle leak; many PinnedHandle = heap fragmentation; a static-held graph is rooted here too. Params: {kind?:string (substring on root kind, e.g. 'handle','pinned','stack','strong','finalizer'), typeFilter?:string (substring on the rooted object's type), max?:int=200}. Returns {summary:{kind->count} over ALL roots, scanned, returned, truncated, roots:[{kind, isPinned, isInterior, rootAddress, object:{type,address}}]}. The summary is always complete (counts every root); roots[] is the filtered+capped sample. Use heap.retention_path to see the full chain from a root down to one object.",
+            p =>
+            {
+                var kindFilter = Dispatcher.Opt<string?>(p, "kind", null);
+                var typeFilter = Dispatcher.Opt<string?>(p, "typeFilter", null);
+                var max = Dispatcher.Opt<int>(p, "max", 200);
+                if (max <= 0) max = 200;
+                var heap = Program.Session.ClrRuntime.Heap;
+                if (!heap.CanWalkHeap) throw new InvalidOperationException("heap not walkable in current state");
+
+                var summary = new Dictionary<string, long>();
+                var roots = new List<object>();
+                long scanned = 0;
+                foreach (var root in heap.EnumerateRoots())
+                {
+                    scanned++;
+                    var kindName = root.RootKind.ToString();
+                    summary[kindName] = summary.TryGetValue(kindName, out var c) ? c + 1 : 1;
+                    if (roots.Count >= max) continue; // keep tallying the summary, stop collecting rows
+                    if (kindFilter != null && kindName.IndexOf(kindFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    var o = root.Object;
+                    var tn = o.Type?.Name;
+                    if (typeFilter != null && (tn == null || tn.IndexOf(typeFilter, StringComparison.OrdinalIgnoreCase) < 0)) continue;
+                    roots.Add(new
+                    {
+                        kind = kindName,
+                        isPinned = root.IsPinned,
+                        isInterior = root.IsInterior,
+                        rootAddress = $"0x{root.Address:X}",
+                        @object = o.IsNull ? null : new { type = tn, address = $"0x{o.Address:X}" },
+                    });
+                }
+                return new { summary, scanned, returned = roots.Count, truncated = roots.Count >= max, roots };
+            });
+
+        d.Register("heap.retention_path",
+            "[DEBUG] Answer 'why is this object still alive?' — find a chain of references from a GC root down to the target object (the managed equivalent of SOS !gcroot / a dotMemory retention path). Heavyweight: builds a reverse-reachability index over the whole heap, so it can be slow on a large process. Params: {address:ulong}. Returns {target, rooted:bool, rootKind?, depth, path:[{address, type, field}]} ordered ROOT -> ... -> target (each hop's `field` is the member on the previous object that points to this one, when resolvable). rooted=false means no root path was found (the object is unreachable / eligible for collection). Typical use: heap.find_instances/stats spots a type whose count keeps growing across snapshots, then retention_path on one instance shows what holds it (e.g. a static cache or an un-removed event handler).",
+            p =>
+            {
+                var addr = Dispatcher.Req<ulong>(p, "address");
+                var heap = Program.Session.ClrRuntime.Heap;
+                if (!heap.CanWalkHeap) throw new InvalidOperationException("heap not walkable in current state");
+                var target = heap.GetObject(addr);
+                if (target.Type == null) throw new ArgumentException($"no type at 0x{addr:X}");
+
+                // GCRoot is configured with the target(s); EnumerateRootPaths yields
+                // (root, chain) pairs for every GC root that reaches the target. The
+                // first path is enough to answer "why is this alive"; the ClrRoot
+                // gives us the anchoring root kind directly.
+                var gcroot = new GCRoot(heap, new ulong[] { addr });
+                string? rootKind = null;
+                List<ulong>? addrs = null;
+                foreach (var pair in gcroot.EnumerateRootPaths())
+                {
+                    rootKind = pair.Item1.RootKind.ToString();
+                    addrs = new List<ulong>();
+                    for (var n = pair.Item2; n != null; n = n.Next) addrs.Add(n.Object);
+                    break;
+                }
+                if (addrs == null || addrs.Count == 0)
+                    return new { target = $"0x{addr:X}", rooted = false, rootKind = (string?)null, depth = 0, path = (object)Array.Empty<object>() };
+
+                // Normalize so the path reads root -> ... -> target.
+                if (addrs[0] == addr) addrs.Reverse();
+
+                // Resolve each hop's type and the field on the previous object that points here.
+                var path = new List<object>();
+                for (int i = 0; i < addrs.Count; i++)
+                {
+                    string? field = null;
+                    if (i > 0)
+                    {
+                        var prev = heap.GetObject(addrs[i - 1]);
+                        foreach (var rf in prev.EnumerateReferencesWithFields(false, true))
+                            if (rf.Object.Address == addrs[i]) { field = rf.Field?.Name ?? (rf.IsArrayElement ? "[]" : null); break; }
+                    }
+                    path.Add(new { address = $"0x{addrs[i]:X}", type = heap.GetObject(addrs[i]).Type?.Name, field });
+                }
+                return new { target = $"0x{addr:X}", rooted = true, rootKind, depth = path.Count, path = (object)path };
+            });
     }
 
     /// <summary>First field on a type matching any of the candidate names (BCL layouts differ across Framework/Core).</summary>

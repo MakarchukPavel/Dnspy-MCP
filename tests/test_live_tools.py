@@ -209,6 +209,43 @@ def test_heap_references_and_referencing(live_agent, mcp):
     assert any("Widget[]" in (r.get("type") or "") for r in inb["referrers"]), inb
 
 
+def test_heap_roots(live_agent, mcp):
+    """debug_heap_roots enumerates GC roots with a complete kind summary. A live
+    process always has handle + stack roots. Skips if the host predates it."""
+    if not any(t.get("name") == "debug_heap_roots" for t in mcp.list_tools()):
+        pytest.skip("debug_heap_roots not in this MCP host build (rebuild dist via builder.ps1)")
+    r = live_agent.call_json("debug_heap_roots", {"max": 10})
+    assert r["scanned"] >= 1, r
+    assert isinstance(r["summary"], dict) and len(r["summary"]) >= 1, r
+    # Sum of per-kind counts equals the total scanned (summary covers ALL roots).
+    assert sum(r["summary"].values()) == r["scanned"], r
+    for row in r["roots"]:
+        assert "kind" in row and "object" in row, row
+
+
+def test_heap_retention_path(live_agent, mcp):
+    """debug_heap_retention_path answers 'why is this alive'. A Widget lives in the
+    static AliveWidgets list, so it must be rooted with a chain ending at it and
+    passing through the List / its backing array. Skips if the host predates it."""
+    if not any(t.get("name") == "debug_heap_retention_path" for t in mcp.list_tools()):
+        pytest.skip("debug_heap_retention_path not in this MCP host build (rebuild dist via builder.ps1)")
+    rows = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "Widget", "max": 64}))
+    w = next(r for r in rows if (r.get("type") or "").endswith(".Widget"))
+    addr = int(w["address"])
+
+    rp = live_agent.call_json("debug_heap_retention_path", {"address": str(addr)})
+    assert rp["rooted"] is True, rp
+    assert rp["rootKind"], rp
+    path = rp["path"]
+    assert path, rp
+    # Oriented root -> ... -> target: last hop IS the widget.
+    assert int(path[-1]["address"], 16) == addr, rp
+    assert (path[-1].get("type") or "").endswith("Widget"), rp
+    # The retention chain passes through the List<Widget> or its backing array.
+    types = " ".join((h.get("type") or "") for h in path)
+    assert "List" in types or "Widget[]" in types, rp
+
+
 def test_heap_read_string(live_agent):
     strs = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "System.String", "max": 1}))
     if not strs:

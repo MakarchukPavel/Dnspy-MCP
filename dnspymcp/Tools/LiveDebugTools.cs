@@ -355,6 +355,16 @@ public static class LiveDebugTools
     public static object HeapReferencing(AgentRegistry reg, string address, int max = 50, string? agent = null)
         => reg.Get(agent).Result("heap.referencing", new { address = Numbers.ParseUInt64(address, "address"), max })!;
 
+    [McpServerTool(Name = "debug_heap_roots")]
+    [Description("[DEBUG] Enumerate GC roots — the anchors keeping objects alive: GC handles (Strong/Pinned/Weak/Dependent/AsyncPinned/RefCounted/SizedRef), stack locals of live threads, and the finalizer queue. Leak-analysis entry point: rising StrongHandle count = handle leak; many PinnedHandle = heap fragmentation. Params: kind (optional substring on root kind, e.g. 'handle','pinned','stack','strong','finalizer'), typeFilter (optional substring on the rooted object's type), max=200, agent (optional). Returns {summary:{kind->count} over ALL roots, scanned, returned, truncated, roots:[{kind,isPinned,isInterior,rootAddress,object:{type,address}}]}. The summary is always complete; roots[] is the filtered+capped sample. Use debug_heap_retention_path for the full chain from a root to one object.")]
+    public static object HeapRoots(AgentRegistry reg, string? kind = null, string? typeFilter = null, int max = 200, string? agent = null)
+        => reg.Get(agent).Result("heap.roots", new { kind, typeFilter, max })!;
+
+    [McpServerTool(Name = "debug_heap_retention_path")]
+    [Description("[DEBUG] Answer 'why is this object still alive?' — find a reference chain from a GC root down to the target object (managed equivalent of SOS !gcroot / a dotMemory retention path). Heavyweight: builds a reverse-reachability index over the whole heap, so it can be slow on a large process like w3wp. Params: address (ulong as string — decimal or hex), agent (optional). Returns {target, rooted, rootKind, depth, path:[{address,type,field}]} ordered ROOT -> ... -> target (each hop's `field` is the member on the previous object pointing here). rooted=false => no root path (object is collectible). Typical use: debug_heap_find_instances/stats spots a type whose count keeps growing, then this shows what holds an instance (e.g. a static cache or un-removed event handler).")]
+    public static object HeapRetentionPath(AgentRegistry reg, string address, string? agent = null)
+        => reg.Get(agent).Result("heap.retention_path", new { address = Numbers.ParseUInt64(address, "address") })!;
+
     [McpServerTool(Name = "debug_heap_static_field")]
     [Description("[DEBUG] Read a STATIC field of a type — the entry point into singletons / caches / feature toggles (e.g. read AppManager's instance static, then drill into the live object graph with debug_heap_read_object). Statics are per-AppDomain; by default reads the first AppDomain where the field is initialized. Value is decoded like debug_heap_read_object (primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address}). Params: typeName (FULL type name, e.g. 'Terrasoft.Core.AppConnection'), fieldName, appDomainIndex=-1 (or a specific index), agent (optional).")]
     public static object HeapStaticField(AgentRegistry reg, string typeName, string fieldName, int appDomainIndex = -1, string? agent = null)

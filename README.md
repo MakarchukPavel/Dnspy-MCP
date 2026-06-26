@@ -171,7 +171,9 @@ debug_heap_read_array                            # elements of a List<T> backing
 debug_heap_read_collection                       # List<T> -> elements, Dictionary<K,V> -> {key,value}
 debug_heap_read_string / debug_heap_stats
 debug_heap_static_field                          # read a type's static field (entry into singletons)
-debug_heap_references / debug_heap_referencing   # outbound refs / who-references-this (retention)
+debug_heap_references / debug_heap_referencing   # outbound refs / who-references-this (1 hop)
+debug_heap_roots                                 # GC roots: handles / stack / finalizer (the anchors)
+debug_heap_retention_path                        # full chain GC root -> ... -> object ("why is this alive")
 
 # memory
 debug_memory_read / debug_memory_write / debug_memory_read_int / debug_disasm
@@ -369,6 +371,31 @@ arguments and locals that come after it.
 element-by-element (paged via `offset` / `count`): primitives decoded,
 reference elements as `{address, type}`, strings as text, nulls as null —
 the missing piece for stepping through a collection's contents.
+
+### Leak analysis (GC roots & retention)
+
+Three tools answer "what's keeping memory alive", in increasing depth:
+
+- `debug_heap_referencing` — one hop up: who points at this object.
+- `debug_heap_roots` — the **anchors** themselves: GC handles
+  (Strong / Pinned / Weak / Dependent / AsyncPinned / RefCounted / SizedRef),
+  stack locals of live threads, and the finalizer queue. The result carries a
+  complete `{kind → count}` summary, so a rising `StrongHandle` count (handle
+  leak) or a pile of `PinnedHandle` (heap fragmentation) jumps out.
+- `debug_heap_retention_path` — the full chain **GC root → … → object** (the
+  managed `!gcroot`), each hop labelled with the field that points to the next.
+  This is the "why is this still alive?" answer.
+
+Typical leak hunt: `debug_heap_stats` / `debug_heap_find_instances` across a few
+snapshots → spot a type whose instance count keeps climbing →
+`debug_heap_retention_path` on one instance → see exactly what holds it (a
+static cache, an un-removed event handler, a captured closure in a long-lived
+timer). A static-held object shows up rooted via the runtime's `PinnedHandle` on
+the per-domain static-storage `object[]`, with the chain running through it.
+All three are read-only ClrMD walks (no func-eval, no code execution) and work
+against a dump too. `debug_heap_retention_path` is heavyweight — it builds a
+reverse-reachability index over the whole heap, so it can be slow on a large
+process.
 
 ### Source-aware debugging (source ↔ IL)
 
