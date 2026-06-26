@@ -270,6 +270,56 @@ references surface as `{address, typeName}` so the caller can drill
 down with `debug_heap_*` from there. Pass `frameIndex` to inspect a
 deeper frame on the pause-thread.
 
+Slot probing no longer stops at the first empty slot: a value the JIT
+optimized away (or not yet in scope) is reported as `{kind:"unavailable"}`
+instead of truncating the list, and trailing unavailable slots are trimmed
+(`readableCount` says how many were actually read). So an optimized-away
+`this`, or an inlined extension-method receiver, no longer hides the
+arguments and locals that come after it.
+
+`debug_heap_read_array` walks a `List<T>` backing array or a `T[]` field
+element-by-element (paged via `offset` / `count`): primitives decoded,
+reference elements as `{address, type}`, strings as text, nulls as null —
+the missing piece for stepping through a collection's contents.
+
+---
+
+## Exception interception
+
+Pause the target when a managed exception is **thrown** (not only at an
+unhandled crash). `debug_exception_break_set` takes a `mode`:
+
+```
+mode: "by_type"     # pause only when the thrown type name matches `typeName`
+mode: "unhandled"   # pause only on exceptions that escape unhandled
+mode: "all"         # pause on every first-chance throw
+```
+
+`firstChance` (default true) selects the throw site vs the unhandled point.
+`debug_wait_paused` then carries an `exceptionHit` block
+(`type / message / hResult / unhandled / thread`); `debug_exception_break_clear`
+disarms. This replaces the old trick of breakpointing an exception's `..ctor`.
+
+### Finding an unknown exception amid noise
+
+A busy app (IIS / Creatio) throws **many** first-chance exceptions internally,
+so `mode=all` alone is a firehose. The fix is a server-side **ignore list**:
+`debug_exception_ignore_add` drops a type so the agent skips it *without an
+MCP round-trip per throw* — the process keeps running at full speed.
+
+The real-debugger workflow, when you don't know the bug's exception type:
+
+1. `debug_exception_break_set(mode="all")`.
+2. `debug_wait_paused` → read the thrown type. If it's noise,
+   `debug_exception_ignore_add("<type>")` then `debug_go`. Check the stack
+   (`debug_thread_stack`) when unsure whether a type is noise or your bug.
+3. Repeat until `debug_wait_paused` goes quiet — the background is drained.
+4. Reproduce the issue → the first **un-ignored** exception is the one that
+   pauses → inspect its stack and frames.
+
+`excludeTypes` on `debug_exception_break_set` seeds the ignore list up front;
+`debug_exception_ignore_clear` resets it.
+
 ---
 
 ## Annotation store (Phase 7)
