@@ -341,24 +341,30 @@ When a value only exists by *running* code — a computed property, `ToString()`
 a helper method — `debug_eval_call` invokes it via `ICorDebugEval`:
 
 ```
-debug_eval_call(expr="arg0.ToString()")    # method (parens force a 0-arg method call)
-debug_eval_call(expr="this.DisplayName")   # bare member: tries get_DisplayName, then DisplayName()
-debug_eval_call(expr="local0.Doubled()")   # 0-arg instance method
+debug_eval_call(expr="arg0.ToString()")                       # method (parens = call)
+debug_eval_call(expr="this.DisplayName")                      # bare member: get_DisplayName, then DisplayName()
+debug_eval_call(expr="local0.Plus(10)")                       # literal int argument
+debug_eval_call(expr="arg0.Tag('hot')")                       # literal string argument
+debug_eval_call(expr="this.GetTypedColumnValue<System.Guid>('UId')")  # generic method + arg
 ```
 
 The receiver is a root slot (`arg<i>` / `local<i>` / `this`); the member
 resolves across the type hierarchy (including inherited / cross-module members
-like `Object.ToString`). The eval runs on the paused thread with **all other
-threads suspended** and a timeout (default 2000 ms) + abort. The result is
-decoded like `debug_eval`; a thrown exception returns
-`{kind:"exception", type, message}`; a timeout returns `{kind:"timeout"}`.
+like `Object.ToString`). Overloads are selected by **(argument count, type-arg
+count)**. Argument literals are an integer (dec / `0x`-hex), `true`/`false`,
+`null`, or a quoted string — they must match the parameter type (literals are
+not coerced). Generic methods take explicit type arguments in `<...>`. The eval
+runs on the paused thread with **all other threads suspended** and a timeout
+(default 2000 ms) + abort. The result is decoded like `debug_eval`; a thrown
+exception returns `{kind:"exception", type, message}`; a timeout returns
+`{kind:"timeout"}`.
 
 ⚠ This **runs code in the target**. If the called method blocks on a lock
 another (suspended) thread holds, it stalls until the timeout fires, then
 aborts. Prefer passive `debug_eval` whenever a field or auto-property answers
-the question. v1 does not support arguments, generic methods, value-type
-(struct) receivers, or multi-hop receivers (`a.b.Method()`) — call on a root
-slot's object.
+the question. Not supported: non-literal/object arguments, type arguments that
+are themselves generic (`List<int>`), value-type (struct) receivers, and
+multi-hop receivers (`a.b.Method()`) — call on a root slot's object.
 
 ---
 

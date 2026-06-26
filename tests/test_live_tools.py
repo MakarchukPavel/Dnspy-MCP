@@ -462,6 +462,39 @@ def test_eval_call_func_eval(live_agent, mcp):
         live_agent.call_json("debug_go")
 
 
+def test_eval_call_args_and_generics(live_agent, mcp):
+    """func-eval v2: literal arguments + generic methods (the
+    GetTypedColumnValue<T>(name) shape). Skips if the host predates the tool."""
+    if not any(t.get("name") == "debug_eval_call" for t in mcp.list_tools()):
+        pytest.skip("debug_eval_call not in this MCP host build (rebuild dist via builder.ps1)")
+
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect"})
+    bp_id = bp["id"]
+    try:
+        assert live_agent.call_json("debug_wait_paused", {"timeoutMs": 6000})["state"] == "Paused"
+
+        tag = live_agent.call_json("debug_eval_call", {"expr": "arg0.Tag(\"hi\")"})["value"]
+        assert tag.get("kind") == "string" and tag["value"].endswith(":hi"), tag
+
+        plus = live_agent.call_json("debug_eval_call", {"expr": "arg0.Plus(10)"})["value"]
+        assert plus.get("kind") == "primitive" and isinstance(plus.get("value"), int), plus
+
+        tn = live_agent.call_json("debug_eval_call", {"expr": "arg0.TypeName<System.Guid>()"})["value"]
+        assert tn.get("kind") == "string" and tn["value"] == "Guid", tn
+
+        comb = live_agent.call_json("debug_eval_call", {"expr": "arg0.Combine<System.Int32>(\"x\")"})["value"]
+        assert comb.get("kind") == "string" and comb["value"] == "x:Int32", comb
+
+        # wrong arity -> structured tool error
+        assert not live_agent.call("debug_eval_call", {"expr": "arg0.Plus()"})["ok"]
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
 def test_conditional_bp_invalid_syntax(live_agent):
     r = live_agent.call("debug_bp_set_by_name", {
         "modulePath": "dnspymcptest",

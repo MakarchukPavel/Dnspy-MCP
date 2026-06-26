@@ -176,4 +176,11 @@ public sealed class Widget
     public string Label => $"{Name}#{Value}";
     public int Doubled() => Value * 2;
     public string Boom() => throw new InvalidOperationException("boom from Widget");
+
+    // Func-eval v2 targets: methods with literal args and generic methods
+    // (mirrors Creatio's entity.GetTypedColumnValue<T>(name) shape).
+    public string Tag(string suffix) => $"{Name}:{suffix}";
+    public int Plus(int n) => Value + n;
+    public string TypeName<T>() => typeof(T).Name;
+    public string Combine<T>(string label) => $"{label}:{typeof(T).Name}";
 }

@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using dndbg.COM.CorDebug;
+using dndbg.COM.MetaData;
 using dndbg.Engine;
 using DnSpyMcp.Agent.Services;
 using Microsoft.Diagnostics.Runtime;
@@ -36,7 +38,7 @@ public static class EvalHandlers
             p => Program.Session.OnDbg<object>(() => Evaluate(p)));
 
         d.Register("eval.call",
-            "[DEBUG] Invoke a ZERO-ARGUMENT instance method or property getter on the paused frame's receiver and return the result — real func-eval via ICorDebug (RUNS target code). expr = \"<root>.<member>\" or \"<root>.<member>()\", root = arg<i>/local<i>/'this'. A bare <member> is tried as a property getter (get_<member>) then a 0-arg method; <member>() forces a method. Resolves across the type hierarchy (incl. base types). Runs on the paused thread with all other threads SUSPENDED and a timeout (default 2000ms) + abort. ⚠ If the called code blocks on a lock another thread holds it can stall the target until the timeout fires. Result decoded like eval.expression; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. Params: {expr:string, frameIndex?:int=0, timeoutMs?:int=2000}. NOT supported in v1: arguments, generic methods, value-type (struct) receivers, multi-hop paths.",
+            "[DEBUG] Invoke an instance method or property getter on the paused frame's receiver and return the result — real func-eval via ICorDebug (RUNS target code). expr = \"<root>.<member>[<TypeArgs>]([args])\", root = arg<i>/local<i>/'this'. A bare <member> (no parens) is a property getter (get_<member>) then a 0-arg method; <member>(...) calls a method; generic methods take explicit type args, e.g. \"arg0.GetTypedColumnValue<System.Guid>('UId')\". Argument literals: integer (dec/0x-hex), true/false, null, or a quoted string (match the parameter type — literals are not coerced). Overloads are selected by (arg count, type-arg count). Resolves across the type hierarchy (incl. base types). Runs on the paused thread with all other threads SUSPENDED and a timeout (default 2000ms) + abort. ⚠ Runs target code: if it blocks on a lock another thread holds it stalls until the timeout. Result decoded like eval.expression; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. Params: {expr:string, frameIndex?:int=0, timeoutMs?:int=2000}. Not supported: non-literal/object args, generic type args that are themselves generic, value-type (struct) receivers, multi-hop receivers (a.b.M()).",
             p => Program.Session.OnDbg<object>(() => CallExpr(p)));
     }
 
@@ -79,14 +81,11 @@ public static class EvalHandlers
         var timeoutMs = Dispatcher.Opt<int>(p, "timeoutMs", 2000);
         if (expr.Length == 0) throw new ArgumentException("expr is required");
 
-        var parts = expr.Split('.');
-        if (parts.Length != 2)
-            throw new ArgumentException("eval.call v1 supports '<root>.<member>' only (root = arg<i>/local<i>/this) — e.g. \"arg0.ToString()\" or \"this.SomeProperty\"");
-        var root = parts[0].Trim();
-        var member = parts[1].Trim();
-        bool forceMethod = member.EndsWith("()", StringComparison.Ordinal);
-        if (forceMethod) member = member.Substring(0, member.Length - 2).Trim();
-        if (member.Length == 0) throw new ArgumentException("missing member name after '.'");
+        int dot = expr.IndexOf('.');
+        if (dot <= 0 || dot >= expr.Length - 1)
+            throw new ArgumentException("eval.call expects '<root>.<member>[<TypeArgs>]([args])' — e.g. \"arg0.ToString()\", \"this.Label\", \"local0.GetTypedColumnValue<System.Guid>('UId')\"");
+        var root = expr.Substring(0, dot).Trim();
+        var (member, typeArgNames, argLits, isCall) = ParseInvocation(expr.Substring(dot + 1).Trim());
 
         var dbg = Program.Session.DnDebugger;
         if (dbg.ProcessState != DebuggerProcessState.Paused)
@@ -99,24 +98,45 @@ public static class EvalHandlers
         var rootVal = ResolveRoot(frame, root)
             ?? throw new ArgumentException($"root '{root}' is unavailable (optimized away or not in scope)");
         if (!rootVal.IsReference)
-            throw new ArgumentException("eval.call v1 requires a reference-type receiver (value-type/struct receivers not supported)");
+            throw new ArgumentException("eval.call requires a reference-type receiver (value-type/struct receivers not supported)");
         var deref = rootVal.DereferencedValue;
         if (deref == null || deref.IsNull) return new { expr, value = new { kind = "null" } };
         var exactType = deref.ExactType
             ?? throw new InvalidOperationException("could not resolve the receiver's runtime type");
-
-        var candidates = forceMethod ? new[] { member } : new[] { "get_" + member, member };
-        var resolved = ResolveMethod(exactType, candidates)
-            ?? throw new ArgumentException(
-                $"member '{member}' not found as a {(forceMethod ? "0-arg method" : "property getter or 0-arg method")} on {DebuggerSession.TryGetCorValueTypeName(deref) ?? "<receiver>"} or its base types");
-
-        var (func, declType) = resolved;
-        var typeArgs = declType.TypeParameters.ToArray();
-        var args = new[] { rootVal };
+        var typeName = DebuggerSession.TryGetCorValueTypeName(deref) ?? "<receiver>";
 
         using var dnEval = dbg.CreateEval(System.Threading.CancellationToken.None, suspendOtherThreads: true);
         dnEval.SetThread(thread);
         dnEval.SetTimeout(TimeSpan.FromMilliseconds(Math.Max(200, timeoutMs)));
+
+        // Resolve method type args (generics) to CorTypes.
+        var methodTypeArgs = typeArgNames
+            .Select(n => ResolveCorType(n) ?? throw new ArgumentException($"generic type argument '{n}' could not be resolved to a loaded type"))
+            .ToArray();
+
+        // Resolve the overload + build the argument list (this + literals).
+        CorFunction func; CorType declType; CorValue[] args;
+        if (!isCall)
+        {
+            var r0 = ResolveMethodForCall(exactType, new[] { "get_" + member, member }, 0, 0)
+                ?? throw new ArgumentException($"member '{member}' not found as a 0-arg property getter or method on {typeName} or its base types");
+            (func, declType) = r0;
+            args = new[] { rootVal };
+        }
+        else
+        {
+            var r0 = ResolveMethodForCall(exactType, new[] { member }, argLits.Count, typeArgNames.Count)
+                ?? throw new ArgumentException($"no overload of '{member}' taking {argLits.Count} argument(s) and {typeArgNames.Count} type argument(s) found on {typeName} or its base types");
+            (func, declType) = r0;
+            var proc = thread.CorThread?.Process;
+            var list = new List<CorValue> { rootVal };
+            foreach (var lit in argLits) list.Add(MakeArgValue(dnEval, proc, lit));
+            args = list.ToArray();
+        }
+
+        // CallParameterizedFunction wants the declaring type's generic args first,
+        // then the method's own type args.
+        var typeArgs = declType.TypeParameters.Concat(methodTypeArgs).ToArray();
 
         EvalResult? res;
         int hr;
@@ -140,29 +160,197 @@ public static class EvalHandlers
         return new { expr, frameIndex, value = r.ResultOrException == null ? (object)new { kind = "void" } : (FrameHandlers.ReadValue(r.ResultOrException) ?? new { kind = "void" }) };
     }
 
+    // ---- parsing: <member>[<T,...>]([arg,...]) -------------------------------
+
+    private enum ArgKind { Int, Bool, Str, Null }
+    private readonly struct ArgLit
+    {
+        public readonly ArgKind Kind; public readonly long Int; public readonly bool Bool; public readonly string? Str;
+        public ArgLit(ArgKind k, long i = 0, bool b = false, string? s = null) { Kind = k; Int = i; Bool = b; Str = s; }
+    }
+
+    private static (string member, List<string> typeArgs, List<ArgLit> args, bool isCall) ParseInvocation(string s)
+    {
+        int i = 0;
+        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '_')) i++;
+        var member = s.Substring(0, i).Trim();
+        if (member.Length == 0) throw new ArgumentException("missing member name after '.'");
+        var rest = s.Substring(i).Trim();
+
+        var typeArgs = new List<string>();
+        var args = new List<ArgLit>();
+        bool isCall = false;
+
+        if (rest.StartsWith("<", StringComparison.Ordinal))
+        {
+            int gt = rest.IndexOf('>');
+            if (gt < 0) throw new ArgumentException("unterminated generic type-argument list (missing '>')");
+            foreach (var t in SplitTopLevel(rest.Substring(1, gt - 1)))
+                if (t.Trim().Length > 0) typeArgs.Add(t.Trim());
+            rest = rest.Substring(gt + 1).Trim();
+            isCall = true;
+        }
+
+        if (rest.StartsWith("(", StringComparison.Ordinal))
+        {
+            int close = rest.LastIndexOf(')');
+            if (close < 0) throw new ArgumentException("unterminated argument list (missing ')')");
+            foreach (var a in SplitTopLevel(rest.Substring(1, close - 1)))
+                if (a.Trim().Length > 0) args.Add(ParseArgLiteral(a.Trim()));
+            isCall = true;
+        }
+        else if (rest.Length > 0 && !isCall)
+            throw new ArgumentException($"unexpected trailing text after member: '{rest}'");
+
+        return (member, typeArgs, args, isCall);
+    }
+
+    // Split a comma-separated list, respecting single/double quotes (no nesting).
+    private static IEnumerable<string> SplitTopLevel(string s)
+    {
+        var parts = new List<string>();
+        int start = 0; char quote = '\0';
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (quote != '\0') { if (c == quote) quote = '\0'; }
+            else if (c == '"' || c == '\'') quote = c;
+            else if (c == ',') { parts.Add(s.Substring(start, i - start)); start = i + 1; }
+        }
+        if (start <= s.Length) parts.Add(s.Substring(start));
+        return parts;
+    }
+
+    private static ArgLit ParseArgLiteral(string s)
+    {
+        if (s.Equals("null", StringComparison.OrdinalIgnoreCase)) return new ArgLit(ArgKind.Null);
+        if (s.Equals("true", StringComparison.OrdinalIgnoreCase)) return new ArgLit(ArgKind.Bool, b: true);
+        if (s.Equals("false", StringComparison.OrdinalIgnoreCase)) return new ArgLit(ArgKind.Bool, b: false);
+        if (s.Length >= 2 && ((s[0] == '"' && s[s.Length - 1] == '"') || (s[0] == '\'' && s[s.Length - 1] == '\'')))
+            return new ArgLit(ArgKind.Str, s: s.Substring(1, s.Length - 2));
+        bool neg = s.StartsWith("-", StringComparison.Ordinal);
+        var body = neg ? s.Substring(1) : s;
+        long val;
+        if (body.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!long.TryParse(body.Substring(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out val))
+                throw new ArgumentException($"bad hex argument '{s}'");
+        }
+        else if (!long.TryParse(body, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out val))
+            throw new ArgumentException($"unsupported argument literal '{s}' (expected integer, true/false, null, or a quoted string)");
+        return new ArgLit(ArgKind.Int, i: neg ? -val : val);
+    }
+
+    // ---- argument marshalling -----------------------------------------------
+
+    private static CorValue MakeArgValue(DnEval dnEval, dndbg.Engine.CorProcess? proc, ArgLit lit)
+    {
+        switch (lit.Kind)
+        {
+            case ArgKind.Null:
+                return dnEval.CreateNull();
+            case ArgKind.Bool:
+            {
+                var v = dnEval.eval.CreateValue(CorElementType.Boolean) ?? throw new InvalidOperationException("could not create a Boolean value");
+                v.WriteGenericValue(new byte[] { (byte)(lit.Bool ? 1 : 0) }, proc);
+                return v;
+            }
+            case ArgKind.Str:
+            {
+                var rs = dnEval.CreateString(lit.Str ?? string.Empty, out int hr);
+                if (rs == null || !rs.Value.NormalResult || rs.Value.ResultOrException == null)
+                    throw new InvalidOperationException($"could not create a string value (hr=0x{hr:X8})");
+                return rs.Value.ResultOrException;
+            }
+            default: // Int — narrow to I4 when it fits, else I8
+            {
+                bool fitsI4 = lit.Int >= int.MinValue && lit.Int <= int.MaxValue;
+                var et = fitsI4 ? CorElementType.I4 : CorElementType.I8;
+                var v = dnEval.eval.CreateValue(et) ?? throw new InvalidOperationException("could not create an integer value");
+                v.WriteGenericValue(fitsI4 ? BitConverter.GetBytes((int)lit.Int) : BitConverter.GetBytes(lit.Int), proc);
+                return v;
+            }
+        }
+    }
+
+    // ---- method + type resolution -------------------------------------------
+
     /// <summary>
     /// Walk the type hierarchy from <paramref name="startType"/> up its base
-    /// chain, returning the first (CorFunction, declaring CorType) where any of
-    /// <paramref name="candidates"/> resolves to a method token. Base CorTypes
-    /// carry their own metadata/module, so this finds inherited members
-    /// (incl. cross-module ones like Object.ToString).
+    /// chain; return the first (CorFunction, declaring CorType) where any of
+    /// <paramref name="names"/> resolves to a method with matching parameter
+    /// count and generic arity. Base CorTypes carry their own metadata/module,
+    /// so inherited / cross-module members (e.g. Object.ToString) resolve too.
     /// </summary>
-    private static (CorFunction func, CorType declType)? ResolveMethod(CorType startType, string[] candidates)
+    private static (CorFunction func, CorType declType)? ResolveMethodForCall(CorType startType, string[] names, int argCount, int genArity)
     {
         for (var t = startType; t != null; t = t.Base)
         {
             if (!t.HasClass) continue;
             var mdi = t.GetMetaDataImport(out uint typeToken);
             if (mdi == null || typeToken == 0) continue;
-            foreach (var name in candidates)
+            foreach (var name in names)
             {
-                uint mtok = MetaDataUtils.FindMethodByName(mdi, typeToken, name, 0);
-                if (mtok == 0) continue;
-                var func = t.Class?.Module?.GetFunctionFromToken(mtok);
-                if (func != null) return (func, t);
+                foreach (var mt in dndbg.Engine.MDAPI.GetMethodTokens(mdi, typeToken))
+                {
+                    if (!string.Equals(dndbg.Engine.MDAPI.GetMethodName(mdi, mt), name, StringComparison.Ordinal)) continue;
+                    if (!SignatureUtils.TryGetMethodArity(mdi, mt, out int ga, out int pc)) continue;
+                    if (pc != argCount || ga != genArity) continue;
+                    var func = t.Class?.Module?.GetFunctionFromToken(mt);
+                    if (func != null) return (func, t);
+                }
             }
         }
         return null;
+    }
+
+    private static readonly HashSet<string> KnownValueTypes = new(StringComparer.Ordinal)
+    {
+        "System.Boolean","System.Byte","System.SByte","System.Char","System.Int16","System.UInt16",
+        "System.Int32","System.UInt32","System.Int64","System.UInt64","System.Single","System.Double",
+        "System.IntPtr","System.UIntPtr","System.Decimal","System.Guid","System.DateTime","System.TimeSpan",
+        "System.DateTimeOffset",
+    };
+
+    /// <summary>Resolve a (non-generic) type name to a CorType by scanning loaded modules.</summary>
+    private static CorType? ResolveCorType(string typeName)
+    {
+        typeName = typeName.Trim();
+        foreach (var (mod, mdi) in EnumModulesWithMeta())
+        {
+            uint tok = MetaDataUtils.FindTypeDefByName(mdi, typeName);
+            if (tok == 0) continue;
+            var cls = mod.GetClassFromToken(tok);
+            if (cls == null) continue;
+            var et = IsValueTypeToken(mdi, tok, typeName) ? CorElementType.ValueType : CorElementType.Class;
+            return cls.GetParameterizedType(et, System.Array.Empty<CorType>());
+        }
+        return null;
+    }
+
+    private static bool IsValueTypeToken(IMetaDataImport mdi, uint typeToken, string typeName)
+    {
+        if (KnownValueTypes.Contains(typeName)) return true;
+        uint ext = dndbg.Engine.MDAPI.GetTypeDefExtends(mdi, typeToken);
+        if (ext == 0) return false;
+        string? baseName = (ext & 0xFF000000) == 0x01000000
+            ? dndbg.Engine.MDAPI.GetTypeRefName(mdi, ext)
+            : MetaDataUtils.FullTypeName(mdi, ext);
+        return baseName == "System.ValueType" || baseName == "System.Enum";
+    }
+
+    private static IEnumerable<(CorModule mod, IMetaDataImport mdi)> EnumModulesWithMeta()
+    {
+        var dbg = Program.Session.DnDebugger;
+        foreach (var proc in dbg.Processes)
+            foreach (var ad in proc.AppDomains)
+                foreach (var asm in ad.Assemblies)
+                    foreach (var mod in asm.Modules)
+                    {
+                        var cm = mod.CorModule;
+                        var mdi = cm?.GetMetaDataInterface<IMetaDataImport>();
+                        if (cm != null && mdi != null) yield return (cm, mdi);
+                    }
     }
 
     private static string? TryExceptionMessage(CorValue? exVal)
