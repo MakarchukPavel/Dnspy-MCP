@@ -153,7 +153,7 @@ public static class EvalHandlers
             return new { expr, frameIndex, value = new { kind = "timeout", reason = $"func-eval exceeded {timeoutMs}ms and was aborted" } };
         }
         if (res == null)
-            throw new InvalidOperationException($"func-eval setup failed (hr=0x{hr:X8})");
+            throw new InvalidOperationException($"func-eval could not run (hr=0x{hr:X8}): {FuncEvalHrHint(hr)}");
 
         var r = res.Value;
         if (r.WasCancelled)
@@ -507,6 +507,23 @@ public static class EvalHandlers
                         if (cm != null && mdi != null) yield return (cm, mdi);
                     }
     }
+
+    /// <summary>
+    /// Map a func-eval failure HRESULT to an actionable hint. These are the
+    /// CorDbg "can't evaluate here" codes (corerror.h) — turning an opaque
+    /// 0x8013xxxx into guidance (optimized module -> reload debuggable; bad
+    /// start point -> try a non-generic call / different site / passive read).
+    /// </summary>
+    private static string FuncEvalHrHint(int hr) => unchecked((uint)hr) switch
+    {
+        0x80131C26 => "the method's module is JIT-optimized (Release). func-eval needs debuggable code — reload it under the debugger (debug_touch_config on the site's web.config, or recycle the app pool while attached, then verify with debug_jit_status) or deploy the build in Debug. Passive debug_eval works regardless.",
+        0x80131C28 => "ICorDebug won't start a func-eval for this method here. This can hit specific (often generic) methods even when other func-evals at the same stop succeed. Try a non-generic equivalent (e.g. GetColumnValue instead of GetTypedColumnValue<T>), break at a different call site, or read the value passively with debug_eval.",
+        0x80131C23 => "the thread is at a GC-unsafe point — func-eval can't run here; step to a safe point or use a different breakpoint.",
+        0x80131C24 => "the thread is in a method prolog — func-eval can't run here yet.",
+        0x80131C25 => "the thread is in native code — func-eval needs a managed frame.",
+        0x80131303 => "a required type isn't loaded in the target.",
+        _ => "the runtime refused the func-eval at this point.",
+    };
 
     private static string? TryExceptionMessage(CorValue? exVal)
     {

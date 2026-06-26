@@ -198,4 +198,8 @@ public sealed class Widget
     // (object args: arg0.Same(arg0)).
     public Widget Link { get; set; }
     public string Same(Widget w) => "same:" + (ReferenceEquals(this, w) ? "yes" : "no");
+
+    // Generic method whose RETURN is the type parameter T (value or reference),
+    // mirroring Entity.GetTypedColumnValue<T>(string) — func-eval handles it.
+    public T Conv<T>(string s) => default(T)!;
 }

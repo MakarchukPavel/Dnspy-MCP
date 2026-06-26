@@ -488,6 +488,10 @@ def test_eval_call_args_and_generics(live_agent, mcp):
         comb = live_agent.call_json("debug_eval_call", {"expr": "arg0.Combine<System.Int32>(\"x\")"})["value"]
         assert comb.get("kind") == "string" and comb["value"] == "x:Int32", comb
 
+        # generic method whose RETURN is the type parameter T (value type) — must work
+        conv = live_agent.call_json("debug_eval_call", {"expr": "arg0.Conv<System.Guid>(\"x\")"})["value"]
+        assert conv.get("kind") in ("object", "Guid", "struct"), conv
+
         # wrong arity -> structured tool error
         assert not live_agent.call("debug_eval_call", {"expr": "arg0.Plus()"})["ok"]
     finally:

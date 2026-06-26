@@ -375,6 +375,16 @@ aborts. Prefer passive `debug_eval` whenever a field or auto-property answers
 the question. Not supported: type arguments that are themselves generic
 (`List<int>`) and value-type (struct) receivers.
 
+When the runtime refuses a call, the error is mapped to an actionable hint
+instead of a raw HRESULT — e.g. an optimized module
+(`CORDBG_E_ILLEGAL_IN_OPTIMIZED_CODE`) points you at the reload-debuggable
+workflow above, and a bad start point (`CORDBG_E_FUNC_EVAL_BAD_START_POINT`)
+suggests a non-generic equivalent / different site / passive read. Note: the
+runtime occasionally refuses a *specific* method (often a particular generic
+instantiation, e.g. `GetTypedColumnValue<Guid>`) with a bad start point even
+when other func-evals at the same stop succeed — use the non-generic
+equivalent (`GetColumnValue("Id")`) or passive `debug_eval` there.
+
 ### Func-eval needs *debuggable* code (Release vs Debug, and `debug_launch`)
 
 Func-eval only works where the JIT produced **debuggable** (un-optimized,
