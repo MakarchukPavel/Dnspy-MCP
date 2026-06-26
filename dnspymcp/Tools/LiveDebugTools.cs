@@ -109,6 +109,16 @@ public static class LiveDebugTools
     public static object Launch(AgentRegistry reg, string exePath, string? args = null, string? workingDir = null, string? agent = null)
         => reg.Get(agent).Result("session.launch", new { exePath, args, workingDir })!;
 
+    [McpServerTool(Name = "debug_jit_status")]
+    [Description("[DEBUG] Report which loaded modules are func-eval-ready. func-eval needs debuggable (un-optimized) JIT, which a module gets only if it loaded UNDER the debugger; a module already JITted before attach stays optimized (func-eval there fails with BAD_START_POINT). Workflow for func-eval on Release Creatio: debug_pid_attach to w3wp, then debug_touch_config (or recycle the app pool) to force an app-domain reload of app-private assemblies (e.g. Terrasoft.Core) WHILE attached, then call this to confirm 'loadedUnderDebugger':true before func-eval. Params: pattern (optional substring, e.g. 'Terrasoft.Core'); agent (optional).")]
+    public static object JitStatus(AgentRegistry reg, string? pattern = null, string? agent = null)
+        => reg.Get(agent).Result("session.jit_status", new { pattern })!;
+
+    [McpServerTool(Name = "debug_touch_config")]
+    [Description("[DEBUG] Touch a file (bump its last-write time, no content change) on the agent's machine — typically a site's web.config — to trigger an ASP.NET app-domain reload. While attached, the reloaded app-private assemblies JIT debuggable (verify with debug_jit_status), enabling func-eval on them without recycling the whole worker process. Params: path (absolute path to the file); agent (optional).")]
+    public static object TouchConfig(AgentRegistry reg, string path, string? agent = null)
+        => reg.Get(agent).Result("session.touch_file", new { path })!;
+
     [McpServerTool(Name = "debug_pid_attach")]
     [Description("[DEBUG] Ask the agent to attach its debugger to a local PID. If already attached, detaches first. Idempotent on the same pid. Optionally registers breakpoints atomically with the attach via initialBreakpointsJson — a JSON array of `{kind:\"by_name\"|\"il\"|\"native\", ...}` specs (matching debug_bp_set_by_name / debug_bp_set_il / debug_bp_set_native params). Closes the attach<->first-RPC race so very-early code paths get caught. Response carries `initialBreakpoints[]` per-spec results. Params: pid:int, initialBreakpointsJson (optional), agent (optional).")]
     public static object Attach(AgentRegistry reg, int pid, string? initialBreakpointsJson = null, string? agent = null)

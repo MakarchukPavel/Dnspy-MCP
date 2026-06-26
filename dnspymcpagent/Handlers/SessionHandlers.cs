@@ -97,6 +97,21 @@ public static class SessionHandlers
                 };
             });
 
+        d.Register("session.jit_status",
+            "[DEBUG] Report which loaded modules are func-eval-ready. A module gets debuggable (un-optimized) JIT only if it loaded UNDER the debugger; a module already JITted before we attached stays optimized and func-eval on it fails with BAD_START_POINT. Use this to check whether e.g. Terrasoft.Core became debuggable after a recycle/app-domain reload while attached. Params: {pattern?:string (substring match, case-insensitive; omit for all)}. Returns {pattern, mode, count, modules:[{module, loadedUnderDebugger, funcEvalReady}]}.",
+            args => Program.Session.ModuleLoadStatus(Dispatcher.Opt<string?>(args, "pattern", null)));
+
+        d.Register("session.touch_file",
+            "[DEBUG] Update a file's last-write time (no content change) — e.g. touch web.config to trigger an ASP.NET app-domain reload. While the debugger is attached, the reloaded app-private assemblies fire fresh LoadModule callbacks and so JIT debuggable, enabling func-eval on them (check with session.jit_status). Params: {path:string (absolute, on the agent's machine)}. Returns {touched, path, lastWriteUtc}.",
+            args =>
+            {
+                var path = Dispatcher.Req<string>(args, "path");
+                if (!System.IO.File.Exists(path)) throw new System.IO.FileNotFoundException($"file not found: {path}");
+                var now = DateTime.UtcNow;
+                System.IO.File.SetLastWriteTimeUtc(path, now);
+                return new { touched = true, path, lastWriteUtc = now.ToString("o") };
+            });
+
         d.Register("session.detach",
             "[DEBUG] Detach from the current target. Agent keeps listening. Idempotent — detach without attach is a no-op.",
             _ =>

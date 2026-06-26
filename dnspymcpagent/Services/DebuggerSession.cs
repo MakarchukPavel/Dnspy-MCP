@@ -37,6 +37,17 @@ public sealed class DebuggerSession : IDisposable
     // ICorDebug). Mutually exclusive with a live attach. Cleared on Detach.
     public string? DumpPath { get; private set; }
 
+    // Func-eval needs the JIT to emit debuggable code, which the options
+    // provider requests at LoadModule — but only effective for modules that load
+    // AFTER the debugger is present. We track each module's name -> "loaded under
+    // the debugger?" so callers can tell whether func-eval will work there.
+    // _jitBaselineDone flips true once the pre-existing-module replay is over
+    // (attach: at OnAttachComplete; launch: before the process runs), so every
+    // load recorded after it is a genuine under-debugger load.
+    private volatile bool _jitBaselineDone;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _moduleLoads =
+        new(StringComparer.OrdinalIgnoreCase);
+
     // Last exit info retained across detach so callers can see WHY the session
     // ended (user-initiated detach, target process exit, etc.).
     public int? LastExitedPid { get; private set; }
@@ -132,7 +143,10 @@ public sealed class DebuggerSession : IDisposable
                     // Subscribe via reflection — reflection sees the event, not the field.
                     var evt = typeof(DnDebugger).GetEvent("OnAttachComplete")
                         ?? throw new InvalidOperationException("DnDebugger.OnAttachComplete event missing");
-                    EventHandler handler = (_, _) => attachComplete.Set();
+                    // Mark the JIT baseline: every LoadModule from here on is a
+                    // genuine under-debugger load (the pre-existing modules were
+                    // replayed during the bootstrap burst before this fires).
+                    EventHandler handler = (_, _) => { _jitBaselineDone = true; attachComplete.Set(); };
                     evt.AddEventHandler(dbg, handler);
 
                     // Subscribe to the raw callback stream so we can implement
@@ -266,6 +280,11 @@ public sealed class DebuggerSession : IDisposable
                 _dnDebugger = null;
                 throw launchError;
             }
+
+            // Launched under the debugger from creation, so every module load is
+            // a genuine under-debugger (debuggable) load — set the baseline before
+            // the dispatcher starts delivering LoadModule callbacks.
+            _jitBaselineDone = true;
 
             // The dispatcher drives the process to its entry point and pauses there.
             // Poll (don't hold an STA Invoke, so the dispatcher can run).
@@ -469,7 +488,33 @@ public sealed class DebuggerSession : IDisposable
             ExceptionInterception = null;
             Pid = null;
             DumpPath = null;
+            _jitBaselineDone = false;
+            _moduleLoads.Clear();
         }
+    }
+
+    /// <summary>
+    /// Report, per loaded module matching <paramref name="pattern"/> (substring,
+    /// case-insensitive; null = all), whether it loaded UNDER the debugger. A
+    /// module loaded under the debugger got the debuggable JIT flags, so
+    /// func-eval works on it; a pre-existing module (already JITted optimized
+    /// when we attached) does not. This is how a caller checks "did the
+    /// DISABLE_OPTIMIZATION flag actually take" for e.g. Terrasoft.Core.
+    /// </summary>
+    public object ModuleLoadStatus(string? pattern)
+    {
+        var rows = _moduleLoads
+            .Where(kv => string.IsNullOrEmpty(pattern) || kv.Key.IndexOf(pattern!, StringComparison.OrdinalIgnoreCase) >= 0)
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => new { module = kv.Key, loadedUnderDebugger = kv.Value, funcEvalReady = kv.Value })
+            .ToList();
+        return new
+        {
+            pattern,
+            mode = DumpPath != null ? "dump" : (IsAttached ? (_jitBaselineDone ? "live" : "attaching") : "none"),
+            count = rows.Count,
+            modules = rows,
+        };
     }
 
     // ---- exception interception ------------------------------------------
@@ -480,6 +525,21 @@ public sealed class DebuggerSession : IDisposable
     // are safe because this fires on the STA thread.
     private void OnDebugCallback(object sender, DebugCallbackEventArgs e)
     {
+        // Record every module load with whether it happened under the debugger
+        // (after the pre-existing-module baseline). dndbg has already applied the
+        // options-provider's debuggable JIT flags to this module by now, so a
+        // post-baseline load == func-eval-ready.
+        if (e.Kind == DebugCallbackKind.LoadModule)
+        {
+            try
+            {
+                var nm = ((LoadModuleDebugCallbackEventArgs)e).CorModule?.Name;
+                if (!string.IsNullOrEmpty(nm))
+                    _moduleLoads[System.IO.Path.GetFileName(nm)] = _jitBaselineDone;
+            }
+            catch { /* never throw on the STA callback */ }
+        }
+
         var filter = ExceptionInterception;
         if (filter is null) return;
         if (e.Kind != DebugCallbackKind.Exception2) return;

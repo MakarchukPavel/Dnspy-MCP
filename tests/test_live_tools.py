@@ -560,6 +560,21 @@ def test_eval_call_object_args_and_multihop(live_agent, mcp):
         live_agent.call_json("debug_go")
 
 
+def test_jit_status_reports_funceval_readiness(live_agent, mcp):
+    """debug_jit_status reports per-module func-eval readiness. The shared
+    session attached to an ALREADY-running target, so its own module pre-existed
+    -> loadedUnderDebugger should be False (func-eval there hits BAD_START_POINT).
+    Read-only; doesn't disturb the session. Skips if the host predates the tool."""
+    if not any(t.get("name") == "debug_jit_status" for t in mcp.list_tools()):
+        pytest.skip("debug_jit_status not in this MCP host build (rebuild dist via builder.ps1)")
+    r = live_agent.call_json("debug_jit_status", {"pattern": "dnspymcptest"})
+    assert r.get("mode") == "live", r
+    mods = r.get("modules") or []
+    assert mods, f"dnspymcptest module not tracked: {r}"
+    # attached to a pre-existing process -> not loaded under the debugger
+    assert mods[0]["loadedUnderDebugger"] is False, mods
+
+
 def test_launch_under_debugger(live_agent, mcp, testtarget_pid, testtarget_asm):
     """debug_launch starts the target UNDER the debugger (paused at entry), so
     every module loads with JIT optimization disabled and func-eval works. We

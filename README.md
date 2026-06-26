@@ -390,11 +390,26 @@ effect for modules that load *after* the debugger is present:
   before any module loads, so **all** modules are debuggable → func-eval works
   even on Release/optimized assemblies. Use this for any target you can start
   yourself (a console app, a service).
-- **IIS / Creatio**: you can't launch `w3wp` yourself. Either **deploy the
-  build in Debug** (then a normal `debug_pid_attach` gives working func-eval —
-  verified), or attach to a *freshly recycled* worker **before** the Creatio
-  assemblies load (early-attach; the modules then load debuggable). Setting
-  `COMPlus_JITMinOpts=1` is **not** enough — it disables optimization but not
+- **IIS / Creatio**: you can't launch `w3wp` yourself. Best option: **deploy
+  the build in Debug** (a normal `debug_pid_attach` then gives working
+  func-eval — verified). Otherwise, force the target assemblies to **reload
+  while you're attached** so they re-JIT debuggable:
+
+  ```
+  debug_pid_attach(pid=<w3wp>)
+  debug_jit_status(pattern="Terrasoft.Core")     # loadedUnderDebugger:false (pre-existing, optimized)
+  debug_touch_config(path="…\\bin\\..\\web.config")  # bump web.config -> ASP.NET app-domain reload
+  # (or recycle the app pool)
+  debug_jit_status(pattern="Terrasoft.Core")     # loadedUnderDebugger:true  -> func-eval ready
+  ```
+
+  `debug_touch_config` bumps a file's timestamp to trigger an app-domain reload;
+  the reloaded **app-private** assemblies fire fresh `LoadModule` callbacks and
+  JIT debuggable. `debug_jit_status` tells you, per module, whether it loaded
+  under the debugger (so you know before trying func-eval). Caveats: assemblies
+  that are **domain-neutral** (GAC / framework) are shared across app domains
+  and won't re-JIT, so func-eval into those still won't work; and setting
+  `COMPlus_JITMinOpts=1` does **not** help — it disables optimization but not
   the debuggability tracking func-eval needs.
 
 ---
