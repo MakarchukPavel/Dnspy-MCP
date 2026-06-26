@@ -97,7 +97,12 @@ public static class LiveDebugTools
 
     // Agent lifecycle is runtime-controllable: one agent process can be
     // attached to any local PID over its lifetime, and auto-detaches when
-    // the target dies. Load-dump stays startup-only (dumps are immutable).
+    // the target dies. It can also be repointed at a dump file (debug_load_dump).
+
+    [McpServerTool(Name = "debug_load_dump")]
+    [Description("[DEBUG] Load a .NET crash/process dump (.dmp) for passive postmortem analysis via ClrMD. Heap tools (debug_heap_find_instances / read_object / read_array / read_string / stats) and struct decoding (Guid/DateTime/enum/...) work on the dump. NO live debugging — breakpoints, stepping, frames, exceptions, and func-eval need a live process and are unavailable on a dump. Detaches any current target first. Params: path = absolute path to the .dmp ON THE AGENT'S MACHINE; agent (optional). Switch back with debug_pid_attach.")]
+    public static object LoadDump(AgentRegistry reg, string path, string? agent = null)
+        => reg.Get(agent).Result("session.load_dump", new { path })!;
 
     [McpServerTool(Name = "debug_pid_attach")]
     [Description("[DEBUG] Ask the agent to attach its debugger to a local PID. If already attached, detaches first. Idempotent on the same pid. Optionally registers breakpoints atomically with the attach via initialBreakpointsJson — a JSON array of `{kind:\"by_name\"|\"il\"|\"native\", ...}` specs (matching debug_bp_set_by_name / debug_bp_set_il / debug_bp_set_native params). Closes the attach<->first-RPC race so very-early code paths get caught. Response carries `initialBreakpoints[]` per-spec results. Params: pid:int, initialBreakpointsJson (optional), agent (optional).")]

@@ -11,10 +11,10 @@ public static class SessionHandlers
 {
     public static void Register(Dispatcher d)
     {
-        // Attach / detach are runtime-controllable — one agent process can be
-        // repointed at any local PID across its lifetime, no restart required.
-        // Target process death auto-detaches; the agent itself keeps listening.
-        // Load-dump stays startup-only (dumps are immutable by nature).
+        // Attach / detach / load_dump are runtime-controllable — one agent
+        // process can be repointed at any local PID or dump file across its
+        // lifetime, no restart required. Target process death auto-detaches;
+        // the agent itself keeps listening.
 
         d.Register("session.attach",
             "[DEBUG] Attach the debugger to a local .NET process by PID. If already attached elsewhere, detaches first. Optionally registers a list of breakpoints atomically with the attach (eliminates the attach<->first-RPC race). Params: {pid:int, initialBreakpointsJson?:string=JSON-encoded array of breakpoint specs; supported kinds: \"by_name\" / \"il\" / \"native\"}. Returns {attached, pid, description, initialBreakpoints?:[{ok, bp?, error?, spec?}]}.",
@@ -67,6 +67,20 @@ public static class SessionHandlers
                 };
             });
 
+        d.Register("session.load_dump",
+            "[DEBUG] Load a .NET crash/process dump (.dmp) for passive postmortem analysis via ClrMD — heap walk, read object/array/string, struct decoding all work on the dump. NO live debugging (breakpoints / stepping / frames / func-eval need a live process). Detaches any current target first. Params: {path:string = absolute path to the .dmp on the agent's machine}. Returns {dumpLoaded, dumpPath, description}.",
+            args =>
+            {
+                var path = Dispatcher.Req<string>(args, "path");
+                Program.Session.LoadDump(path);
+                return new
+                {
+                    dumpLoaded = true,
+                    dumpPath = Program.Session.DumpPath,
+                    description = Program.Session.Describe(),
+                };
+            });
+
         d.Register("session.detach",
             "[DEBUG] Detach from the current target. Agent keeps listening. Idempotent — detach without attach is a no-op.",
             _ =>
@@ -92,6 +106,7 @@ public static class SessionHandlers
                 {
                     isAttached = Program.Session.IsAttached,
                     pid = Program.Session.Pid,
+                    dumpPath = Program.Session.DumpPath,
                     description = Program.Session.Describe(),
                     lastExitedPid = Program.Session.LastExitedPid,
                     lastExitReason = Program.Session.LastExitReason,

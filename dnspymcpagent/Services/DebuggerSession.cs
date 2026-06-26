@@ -11,12 +11,13 @@ using Microsoft.Diagnostics.Runtime;
 namespace DnSpyMcp.Agent.Services;
 
 /// <summary>
-/// Holds the single active debugger target.
-/// Uses dnSpy's <see cref="DebuggerThread"/> to serialize ICorDebug calls onto an STA thread.
-/// ClrMD is attached in parallel for passive heap inspection (no STA hop, works while
-/// the target is Running or Paused). Live attach only — dump-file analysis is not
-/// supported (the heap/memory subset that worked there is better served by
-/// IDA/WinDbg MCPs which have first-class dump support).
+/// Holds the single active debugger target — either a LIVE process or a loaded
+/// crash/process dump (mutually exclusive).
+/// For a live target, uses dnSpy's <see cref="DebuggerThread"/> to serialize
+/// ICorDebug calls onto an STA thread, with ClrMD attached in parallel for
+/// passive heap inspection. For a dump (<see cref="LoadDump"/>), only ClrMD is
+/// used — the heap readers and struct decoding work, but live operations
+/// (breakpoints / stepping / frames / func-eval) are unavailable.
 /// </summary>
 public sealed class DebuggerSession : IDisposable
 {
@@ -31,6 +32,10 @@ public sealed class DebuggerSession : IDisposable
 
     public int? Pid { get; private set; }
     public bool IsAttached => _dnDebugger != null;
+
+    // Set when a crash/process dump is loaded (passive ClrMD analysis, no live
+    // ICorDebug). Mutually exclusive with a live attach. Cleared on Detach.
+    public string? DumpPath { get; private set; }
 
     // Last exit info retained across detach so callers can see WHY the session
     // ended (user-initiated detach, target process exit, etc.).
@@ -201,6 +206,40 @@ public sealed class DebuggerSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Load a crash/process dump (.dmp) for passive postmortem analysis via
+    /// ClrMD. No ICorDebug — the heap readers and struct decoding work, but
+    /// live operations (breakpoints / stepping / frames / func-eval) do not.
+    /// Detaches any current live target or previously-loaded dump first.
+    /// </summary>
+    public void LoadDump(string path)
+    {
+        lock (_lock)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                throw new ArgumentException("dump path is required");
+            if (!System.IO.File.Exists(path))
+                throw new System.IO.FileNotFoundException($"dump file not found: {path}");
+
+            Detach(); // drop any live attach or prior dump
+            // A fresh dump load starts a clean history.
+            LastExitedPid = null;
+            LastExitReason = null;
+            LastExitUtc = null;
+
+            var target = DataTarget.LoadDump(path);
+            var runtime = target.ClrVersions.FirstOrDefault()?.CreateRuntime();
+            if (runtime == null)
+            {
+                target.Dispose();
+                throw new InvalidOperationException($"no CLR runtime found in dump: {path}");
+            }
+            _clrMdTarget = target;
+            _clrRuntime = runtime;
+            DumpPath = path;
+        }
+    }
+
     // ---- target process death watcher -----------------------------------
     // ICorDebug's managed callback model is STA-bound and fragile in remote-
     // attach scenarios; rather than rely on ExitProcess callbacks we poll the
@@ -344,6 +383,7 @@ public sealed class DebuggerSession : IDisposable
             Breakpoints.Clear();
             ExceptionInterception = null;
             Pid = null;
+            DumpPath = null;
         }
     }
 
@@ -473,6 +513,11 @@ public sealed class DebuggerSession : IDisposable
         {
             var clr = _clrRuntime?.ClrInfo.Version.ToString() ?? "?";
             return $"attached pid={Pid} CLR={clr}";
+        }
+        if (DumpPath != null)
+        {
+            var clr = _clrRuntime?.ClrInfo.Version.ToString() ?? "?";
+            return $"dump loaded: {DumpPath} CLR={clr}";
         }
         return "no target";
     }

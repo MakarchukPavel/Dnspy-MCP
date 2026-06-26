@@ -525,6 +525,48 @@ def test_eval_call_overload_by_arg_type(live_agent, mcp):
         live_agent.call_json("debug_go")
 
 
+def test_load_dump_postmortem(live_agent, mcp, testtarget_pid):
+    """debug_load_dump: snapshot the test target to a full .dmp, load it, and
+    confirm passive heap walk + struct decoding work on the dump. Restores the
+    live attach afterwards so later tests still have a live target. Skips when
+    the host predates the tool or a dump can't be produced (permissions)."""
+    import os
+    import subprocess
+    import time
+
+    if not any(t.get("name") == "debug_load_dump" for t in mcp.list_tools()):
+        pytest.skip("debug_load_dump not in this MCP host build (rebuild dist via builder.ps1)")
+
+    dump = os.path.join(os.environ.get("TEMP", "."), "dnspymcp_pytest.dmp")
+    if os.path.exists(dump):
+        try: os.remove(dump)
+        except OSError: pass
+    subprocess.run(["rundll32.exe", r"C:\Windows\System32\comsvcs.dll,MiniDump",
+                    str(testtarget_pid), dump, "full"], capture_output=True)
+    for _ in range(40):
+        if os.path.exists(dump) and os.path.getsize(dump) > 0: break
+        time.sleep(0.25)
+    if not (os.path.exists(dump) and os.path.getsize(dump) > 0):
+        pytest.skip("could not create a dump (insufficient privileges?)")
+
+    try:
+        r = live_agent.call_json("debug_load_dump", {"path": dump})
+        assert "dump loaded" in (r.get("description") or ""), r
+        ds = live_agent.call_json("debug_session_info").get("debugState") or {}
+        assert ds.get("dumpPath") == dump and not ds.get("isAttached"), ds
+
+        rows = _items(live_agent.call_json("debug_heap_find_instances", {"typeName": "Widget", "max": 64}))
+        widgets = [w for w in rows if (w.get("type") or "").endswith(".Widget")]
+        assert widgets, f"no Widget in dump heap: {rows[:3]}"
+        obj = live_agent.call_json("debug_heap_read_object", {"address": str(int(widgets[0]["address"])), "maxFields": 32})
+        by_type = {(f.get("typeName") or ""): f for f in obj["fields"]}
+        assert by_type.get("System.Guid", {}).get("value", {}).get("kind") == "Guid", obj["fields"]
+        assert by_type.get("System.DateTime", {}).get("value", {}).get("kind") == "DateTime", obj["fields"]
+    finally:
+        # Restore the shared live session for subsequent tests.
+        live_agent.call_json("debug_pid_attach", {"pid": testtarget_pid})
+
+
 def test_conditional_bp_invalid_syntax(live_agent):
     r = live_agent.call("debug_bp_set_by_name", {
         "modulePath": "dnspymcptest",

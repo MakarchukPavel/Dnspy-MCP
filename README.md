@@ -130,6 +130,7 @@ debug_list_dotnet_processes
 
 # attach / detach (runtime — no agent restart needed)
 debug_pid_attach / debug_pid_detach
+debug_load_dump                                  # passive postmortem analysis of a .dmp
 # debug_pid_attach also accepts initialBreakpointsJson to register BPs
 # atomically inside the attach handshake (closes the attach<->first-RPC race).
 
@@ -391,6 +392,32 @@ type (their layout is a fixed unmanaged blob). Enums map the underlying number
 to the member name. Any other struct is expanded one level into its fields, so
 e.g. an entity's `UId`/`_modifiedOnUtc` come back as real values rather than
 `<Struct>`.
+
+---
+
+## Dump (postmortem) analysis
+
+`debug_load_dump(path=...)` points the agent at a crash/process dump (`.dmp`)
+instead of a live process — for postmortem analysis when there's nothing left
+to attach to:
+
+```
+debug_load_dump(path="C:\\dumps\\w3wp.dmp")
+debug_heap_stats() / debug_heap_find_instances(...) / debug_heap_read_object(...)
+```
+
+ClrMD reads the dump, so the whole **passive** surface works — heap walk, read
+object/array/string, and full struct decoding (Guid/DateTime/enum/...). Because
+there's no live process, the **ICorDebug** features do not: breakpoints,
+stepping, frames, exception interception, and `debug_eval*` all require a live
+target. Loading a dump detaches any current target; `debug_pid_attach` switches
+back to live. The path is resolved on the **agent's** machine. Optimization
+doesn't matter here — postmortem reads are passive, so dumps of Release
+assemblies analyze fine (unlike live func-eval).
+
+Produce a full dump however you like, e.g. the built-in
+`rundll32 C:\Windows\System32\comsvcs.dll,MiniDump <pid> <path> full`,
+`procdump -ma`, or Task Manager → *Create dump file*.
 
 ---
 

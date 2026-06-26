@@ -105,8 +105,10 @@ internal sealed class CliOptions
 
             Live process attach is driven from the MCP tool `debug_pid_attach`
             (or RPC method `session.attach` over TCP) after the agent is up —
-            the agent boots in 'no target' mode by default. Dump-file analysis
-            is not supported; use IDA / WinDbg MCPs for offline dumps.
+            the agent boots in 'no target' mode by default. A crash/process dump
+            can be loaded for passive ClrMD analysis via `debug_load_dump`
+            (RPC `session.load_dump`); live ops (bp/step/frames/eval) need a
+            live process.
 
             Protocol: persistent TCP + newline-delimited JSON.
               Client sends:   {"id":N,"method":"...","params":{...}}
