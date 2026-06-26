@@ -38,7 +38,7 @@ public static class EvalHandlers
             p => Program.Session.OnDbg<object>(() => Evaluate(p)));
 
         d.Register("eval.call",
-            "[DEBUG] Invoke an instance method or property getter on the paused frame's receiver and return the result — real func-eval via ICorDebug (RUNS target code). expr = \"<root>.<member>[<TypeArgs>]([args])\", root = arg<i>/local<i>/'this'. A bare <member> (no parens) is a property getter (get_<member>) then a 0-arg method; <member>(...) calls a method; generic methods take explicit type args, e.g. \"arg0.GetTypedColumnValue<System.Guid>('UId')\". Argument literals: integer (dec/0x-hex), true/false, null, or a quoted string. Overloads are selected by (arg count, type-arg count, AND argument type — a string literal picks the (string) overload over a (SomeClass) one). Resolves across the type hierarchy (incl. base types). Runs on the paused thread with all other threads SUSPENDED and a timeout (default 2000ms) + abort. ⚠ Runs target code: if it blocks on a lock another thread holds it stalls until the timeout. Result decoded like eval.expression; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. Params: {expr:string, frameIndex?:int=0, timeoutMs?:int=2000}. Not supported: non-literal/object args, generic type args that are themselves generic, value-type (struct) receivers, multi-hop receivers (a.b.M()).",
+            "[DEBUG] Invoke an instance method or property getter on the paused frame and return the result — real func-eval via ICorDebug (RUNS target code). expr = \"<receiver>.<member>[<TypeArgs>]([args])\". Receiver is a root (arg<i>/local<i>/'this') with an OPTIONAL field/auto-property path, e.g. \"this.Entity.GetTypedColumnValue<System.Guid>('Id')\". A bare <member> (no parens) is a property getter (get_<member>) then a 0-arg method; <member>(...) calls a method; generic methods take explicit type args. Arguments are literals (integer dec/0x-hex, true/false, null, quoted string) OR value expressions arg/local/this[.field] resolved to live objects, e.g. \"arg0.Equals(arg1)\", \"this.Save(arg0.Context)\". Overloads selected by (arg count, type-arg count, AND argument type — a string literal picks (string) over (SomeClass)). Resolves across the type hierarchy. Runs on the paused thread with other threads SUSPENDED, timeout (default 2000ms) + abort. ⚠ Runs target code: if it blocks on a lock another thread holds it stalls until the timeout. Result decoded like eval.expression; a thrown exception returns {kind:'exception',type,message}; timeout returns {kind:'timeout'}. Params: {expr:string, frameIndex?:int=0, timeoutMs?:int=2000}. Not supported: nested-generic type args (List<int>), value-type (struct) receivers.",
             p => Program.Session.OnDbg<object>(() => CallExpr(p)));
     }
 
@@ -81,11 +81,15 @@ public static class EvalHandlers
         var timeoutMs = Dispatcher.Opt<int>(p, "timeoutMs", 2000);
         if (expr.Length == 0) throw new ArgumentException("expr is required");
 
-        int dot = expr.IndexOf('.');
-        if (dot <= 0 || dot >= expr.Length - 1)
-            throw new ArgumentException("eval.call expects '<root>.<member>[<TypeArgs>]([args])' — e.g. \"arg0.ToString()\", \"this.Label\", \"local0.GetTypedColumnValue<System.Guid>('UId')\"");
-        var root = expr.Substring(0, dot).Trim();
-        var (member, typeArgNames, argLits, isCall) = ParseInvocation(expr.Substring(dot + 1).Trim());
+        // Split into top-level dot segments (ignoring dots inside <...>, (...),
+        // or quotes). The last segment is the invocation; segment 0 is the root;
+        // anything between is a field path walked to reach the receiver.
+        var segments = SplitTopLevelDots(expr);
+        if (segments.Count < 2)
+            throw new ArgumentException("eval.call expects '<receiver>.<member>[<TypeArgs>]([args])' — e.g. \"arg0.ToString()\", \"this.Entity.GetTypedColumnValue<System.Guid>('Id')\", \"arg0.Equals(arg1)\"");
+        var root = segments[0].Trim();
+        var receiverPath = segments.Skip(1).Take(segments.Count - 2).Select(s => s.Trim()).ToArray();
+        var (member, typeArgNames, argLits, isCall) = ParseInvocation(segments[segments.Count - 1].Trim());
 
         var dbg = Program.Session.DnDebugger;
         if (dbg.ProcessState != DebuggerProcessState.Paused)
@@ -95,8 +99,8 @@ public static class EvalHandlers
         var frame = FrameHandlers.WalkToFrame(thread, frameIndex)
             ?? throw new ArgumentException($"frameIndex {frameIndex} not found on the paused thread");
 
-        var rootVal = ResolveRoot(frame, root)
-            ?? throw new ArgumentException($"root '{root}' is unavailable (optimized away or not in scope)");
+        var rootVal = ResolveValueExpr(frame, root, receiverPath)
+            ?? throw new ArgumentException($"receiver '{string.Join(".", new[] { root }.Concat(receiverPath))}' is unavailable (optimized away, null, or a field not found)");
         if (!rootVal.IsReference)
             throw new ArgumentException("eval.call requires a reference-type receiver (value-type/struct receivers not supported)");
         var deref = rootVal.DereferencedValue;
@@ -130,7 +134,7 @@ public static class EvalHandlers
             (func, declType) = r0;
             var proc = thread.CorThread?.Process;
             var list = new List<CorValue> { rootVal };
-            foreach (var lit in argLits) list.Add(MakeArgValue(dnEval, proc, lit));
+            foreach (var lit in argLits) list.Add(MakeArgValue(dnEval, proc, frame, lit));
             args = list.ToArray();
         }
 
@@ -162,7 +166,11 @@ public static class EvalHandlers
 
     // ---- parsing: <member>[<T,...>]([arg,...]) -------------------------------
 
-    private enum ArgKind { Int, Bool, Str, Null }
+    private enum ArgKind { Int, Bool, Str, Null, Expr }
+
+    // An argument that is itself a value expression: arg/local/this[.field]*.
+    private static readonly Regex ExprRe =
+        new(@"^(arg\d+|local\d+|this)(\.[A-Za-z_][A-Za-z0-9_]*)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private readonly struct ArgLit
     {
         public readonly ArgKind Kind; public readonly long Int; public readonly bool Bool; public readonly string? Str;
@@ -221,6 +229,67 @@ public static class EvalHandlers
         return parts;
     }
 
+    // Split on top-level dots, ignoring dots inside <...>, (...), or quotes
+    // (so "this.Entity.GetTypedColumnValue<System.Guid>('a.b')" splits into
+    // [this, Entity, GetTypedColumnValue<System.Guid>('a.b')]).
+    private static List<string> SplitTopLevelDots(string s)
+    {
+        var parts = new List<string>();
+        int start = 0, angle = 0, paren = 0; char quote = '\0';
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (quote != '\0') { if (c == quote) quote = '\0'; continue; }
+            switch (c)
+            {
+                case '"': case '\'': quote = c; break;
+                case '<': angle++; break;
+                case '>': if (angle > 0) angle--; break;
+                case '(': paren++; break;
+                case ')': if (paren > 0) paren--; break;
+                case '.':
+                    if (angle == 0 && paren == 0) { parts.Add(s.Substring(start, i - start)); start = i + 1; }
+                    break;
+            }
+        }
+        parts.Add(s.Substring(start));
+        return parts;
+    }
+
+    /// <summary>
+    /// Resolve a value expression — a root slot (arg/local/this) followed by a
+    /// field/auto-property path — to a CorValue, reading intermediate fields via
+    /// ICorDebug (<see cref="CorValue.GetFieldValue"/>) so the result stays a
+    /// live CorValue usable as a receiver or argument. Returns null if the root
+    /// is unavailable, a hop is null, or a field name doesn't resolve.
+    /// </summary>
+    private static CorValue? ResolveValueExpr(CorFrame frame, string root, string[] fieldPath)
+    {
+        var v = ResolveRoot(frame, root);
+        if (v == null) return null;
+        foreach (var seg in fieldPath)
+        {
+            var d = v.IsReference ? v.DereferencedValue : v;
+            if (d == null || d.IsNull) return null;
+            var t = d.ExactType;
+            if (t == null) return null;
+
+            CorClass? declClass = null; uint ftok = 0;
+            for (var ct = t; ct != null; ct = ct.Base)
+            {
+                if (!ct.HasClass) continue;
+                var mdi = ct.GetMetaDataImport(out uint typeToken);
+                if (mdi == null || typeToken == 0) continue;
+                uint f = MetaDataUtils.FindFieldByName(mdi, typeToken, seg);
+                if (f != 0) { declClass = ct.Class; ftok = f; break; }
+            }
+            if (declClass == null || ftok == 0) return null;
+            v = d.GetFieldValue(declClass, ftok);
+            if (v == null) return null;
+        }
+        return v;
+    }
+
     private static ArgLit ParseArgLiteral(string s)
     {
         if (s.Equals("null", StringComparison.OrdinalIgnoreCase)) return new ArgLit(ArgKind.Null);
@@ -237,14 +306,25 @@ public static class EvalHandlers
                 throw new ArgumentException($"bad hex argument '{s}'");
         }
         else if (!long.TryParse(body, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out val))
-            throw new ArgumentException($"unsupported argument literal '{s}' (expected integer, true/false, null, or a quoted string)");
+        {
+            // Not a literal — accept a value expression (arg/local/this[.field]*),
+            // resolved to a CorValue at call time.
+            if (ExprRe.IsMatch(s)) return new ArgLit(ArgKind.Expr, s: s);
+            throw new ArgumentException($"unsupported argument '{s}' (expected integer, true/false, null, a quoted string, or an arg/local/this[.field] expression)");
+        }
         return new ArgLit(ArgKind.Int, i: neg ? -val : val);
     }
 
     // ---- argument marshalling -----------------------------------------------
 
-    private static CorValue MakeArgValue(DnEval dnEval, dndbg.Engine.CorProcess? proc, ArgLit lit)
+    private static CorValue MakeArgValue(DnEval dnEval, dndbg.Engine.CorProcess? proc, CorFrame frame, ArgLit lit)
     {
+        if (lit.Kind == ArgKind.Expr)
+        {
+            var segs = SplitTopLevelDots(lit.Str ?? string.Empty);
+            return ResolveValueExpr(frame, segs[0].Trim(), segs.Skip(1).Select(x => x.Trim()).ToArray())
+                ?? throw new InvalidOperationException($"argument expression '{lit.Str}' could not be resolved (optimized away, null, or field not found)");
+        }
         switch (lit.Kind)
         {
             case ArgKind.Null:
@@ -366,6 +446,11 @@ public static class EvalHandlers
                 if (pet == CorElementType.Boolean) return 3;
                 if (pet == CorElementType.Object || isGenericVar) return 1;
                 if (IsNumericElement(pet)) return 0;
+                return -3;
+            case ArgKind.Expr: // an object expression — prefer a class param over string/value types
+                if (pet == CorElementType.Class) return 3;
+                if (pet == CorElementType.Object || isGenericVar || pet == CorElementType.GenericInst || pet == CorElementType.SZArray) return 2;
+                if (pet == CorElementType.String) return 1;
                 return -3;
             default: // Null — fits any reference type, not a value type
                 if (pet == CorElementType.Class || pet == CorElementType.Object || pet == CorElementType.String

@@ -347,27 +347,32 @@ debug_eval_call(expr="this.DisplayName")                      # bare member: get
 debug_eval_call(expr="local0.Plus(10)")                       # literal int argument
 debug_eval_call(expr="arg0.Tag('hot')")                       # literal string argument
 debug_eval_call(expr="this.GetTypedColumnValue<System.Guid>('UId')")  # generic method + arg
+debug_eval_call(expr="arg0.Entity.GetColumnValue('Name')")    # multi-hop receiver (arg0.Entity, then call)
+debug_eval_call(expr="arg0.Compare(arg1.Owner)")              # object argument (resolved from the frame)
 ```
 
-The receiver is a root slot (`arg<i>` / `local<i>` / `this`); the member
-resolves across the type hierarchy (including inherited / cross-module members
-like `Object.ToString`). Overloads are selected by **argument count, type-arg
-count, and argument type** — a string literal picks the `(string)` overload
-over a `(SomeClass)` one, so `GetTypedColumnValue<Guid>("Id")` binds to the
-`(string)` overload rather than the `(EntitySchemaColumn)` one. Argument
-literals are an integer (dec / `0x`-hex), `true`/`false`, `null`, or a quoted
-string. Generic methods take explicit type arguments in `<...>`. The eval
-runs on the paused thread with **all other threads suspended** and a timeout
-(default 2000 ms) + abort. The result is decoded like `debug_eval`; a thrown
-exception returns `{kind:"exception", type, message}`; a timeout returns
+The receiver is a root slot (`arg<i>` / `local<i>` / `this`) with an **optional
+field/auto-property path** (`arg0.Entity.Foo`), walked via ICorDebug to reach
+the object the call is made on. The member resolves across the type hierarchy
+(including inherited / cross-module members like `Object.ToString`). Arguments
+are either **literals** (integer dec / `0x`-hex, `true`/`false`, `null`, quoted
+string) or **value expressions** `arg/local/this[.field]` resolved from the
+frame to live objects — so you can pass one frame value into a method on
+another. Overloads are selected by **argument count, type-arg count, and
+argument type** — a string literal picks `(string)` over `(SomeClass)`, and an
+object expression picks the class overload, so
+`GetTypedColumnValue<Guid>("Id")` binds to `(string)` not
+`(EntitySchemaColumn)`. Generic methods take explicit type arguments in `<...>`.
+The eval runs on the paused thread with **all other threads suspended** and a
+timeout (default 2000 ms) + abort. The result is decoded like `debug_eval`; a
+thrown exception returns `{kind:"exception", type, message}`; a timeout returns
 `{kind:"timeout"}`.
 
 ⚠ This **runs code in the target**. If the called method blocks on a lock
 another (suspended) thread holds, it stalls until the timeout fires, then
 aborts. Prefer passive `debug_eval` whenever a field or auto-property answers
-the question. Not supported: non-literal/object arguments, type arguments that
-are themselves generic (`List<int>`), value-type (struct) receivers, and
-multi-hop receivers (`a.b.Method()`) — call on a root slot's object.
+the question. Not supported: type arguments that are themselves generic
+(`List<int>`) and value-type (struct) receivers.
 
 ---
 

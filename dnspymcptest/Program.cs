@@ -167,6 +167,7 @@ public sealed class Widget
         CreatedAt = DateTime.UtcNow;
         Id = Guid.NewGuid();
         Kind = (WidgetKind)(value % 3); // 0/1/2 -> Unknown/Gadget/Gizmo
+        Link = this; // self-link, for func-eval multi-hop receiver tests
     }
 
     public override string ToString() => $"Widget({Name}, {Value})";
@@ -191,4 +192,10 @@ public sealed class Widget
     public string Pick<T>(Widget other) => "widget:" + (other?.Name ?? "null");
     public string Classify(string s) => "S:" + s;
     public string Classify(int n) => "I:" + n;
+
+    // Func-eval v4 targets: an auto-property holding another object (multi-hop
+    // receiver: arg0.Link.Doubled()) and a method taking an object argument
+    // (object args: arg0.Same(arg0)).
+    public Widget Link { get; set; }
+    public string Same(Widget w) => "same:" + (ReferenceEquals(this, w) ? "yes" : "no");
 }

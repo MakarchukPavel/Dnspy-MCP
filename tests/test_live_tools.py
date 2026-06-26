@@ -525,6 +525,41 @@ def test_eval_call_overload_by_arg_type(live_agent, mcp):
         live_agent.call_json("debug_go")
 
 
+def test_eval_call_object_args_and_multihop(live_agent, mcp):
+    """func-eval v4: multi-hop receivers (arg0.Link.Doubled()) and object/
+    reference arguments (arg0.Same(arg0), arg0.Pick<T>(arg0)). Skips if the
+    host predates the tool."""
+    if not any(t.get("name") == "debug_eval_call" for t in mcp.list_tools()):
+        pytest.skip("debug_eval_call not in this MCP host build (rebuild dist via builder.ps1)")
+
+    _drain_bps(live_agent)
+    bp = live_agent.call_json("debug_bp_set_by_name", {
+        "modulePath": "dnspymcptest", "typeFullName": "DnSpyMcp.TestTarget.Program",
+        "methodName": "Inspect"})
+    bp_id = bp["id"]
+    try:
+        assert live_agent.call_json("debug_wait_paused", {"timeoutMs": 6000})["state"] == "Paused"
+
+        # multi-hop receiver: arg0.Link is a Widget; call a method on it
+        hop = live_agent.call_json("debug_eval_call", {"expr": "arg0.Link.Doubled()"})["value"]
+        assert hop.get("kind") == "primitive" and isinstance(hop.get("value"), int), hop
+
+        # 2-hop receiver ending in a property getter
+        nm = live_agent.call_json("debug_eval_call", {"expr": "arg0.Link.Link.Name"})["value"]
+        assert nm.get("kind") == "string" and nm["value"].startswith("widget-"), nm
+
+        # object argument (non-generic): pass arg0 itself
+        same = live_agent.call_json("debug_eval_call", {"expr": "arg0.Same(arg0)"})["value"]
+        assert same.get("value") == "same:yes", same
+
+        # object argument selects the (Widget) overload over (string)
+        pick = live_agent.call_json("debug_eval_call", {"expr": "arg0.Pick<System.Object>(arg0)"})["value"]
+        assert pick.get("kind") == "string" and pick["value"].startswith("widget:"), pick
+    finally:
+        live_agent.call_json("debug_bp_delete", {"id": bp_id})
+        live_agent.call_json("debug_go")
+
+
 def test_load_dump_postmortem(live_agent, mcp, testtarget_pid):
     """debug_load_dump: snapshot the test target to a full .dmp, load it, and
     confirm passive heap walk + struct decoding work on the dump. Restores the

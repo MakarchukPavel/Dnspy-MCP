@@ -57,4 +57,22 @@ public static class MetaDataUtils
         }
         return 0;
     }
+
+    /// <summary>
+    /// Find a field token by name on a type. Accepts either the raw field name
+    /// or the property name (auto-properties are backed by
+    /// <c>&lt;Name&gt;k__BackingField</c>). Returns 0 if not found.
+    /// </summary>
+    public static uint FindFieldByName(IMetaDataImport mdi, uint typeToken, string name)
+    {
+        uint backing = 0;
+        var backingName = $"<{name}>k__BackingField";
+        foreach (var ft in MDAPI.GetFieldTokens(mdi, typeToken))
+        {
+            var n = MDAPI.GetFieldName(mdi, ft);
+            if (string.Equals(n, name, StringComparison.Ordinal)) return ft;
+            if (backing == 0 && string.Equals(n, backingName, StringComparison.Ordinal)) backing = ft;
+        }
+        return backing;
+    }
 }
