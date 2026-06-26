@@ -45,7 +45,7 @@ public static class StepHandlers
             });
 
         d.Register("debug.wait_paused",
-            "[DEBUG] Block until the target is Paused (breakpoint, step complete, or pause). Returns {state, bpHit?, timedOut?}. bpHit is populated when the pause was triggered by a registered breakpoint and carries the matching id/kind/description/methodToken/ilOffset/thread. Params: {timeoutMs?:int=5000}.",
+            "[DEBUG] Block until the target is Paused (breakpoint, step complete, exception, or pause). Returns {state, bpHit?, exceptionHit?, timedOut?}. bpHit is populated for a registered breakpoint; exceptionHit is populated when an armed exception filter (exception.break_set) stopped at a throw and carries {type, message, hResult, unhandled, thread, address}. Params: {timeoutMs?:int=5000}.",
             p =>
             {
                 var timeout = Dispatcher.Opt<int>(p, "timeoutMs", 5000);
@@ -57,7 +57,9 @@ public static class StepHandlers
                     {
                         object? bpHit = null;
                         try { bpHit = BreakpointHandlers.DescribeCurrentBpHit(); } catch { }
-                        return new { state = state.ToString(), bpHit };
+                        object? exceptionHit = null;
+                        try { exceptionHit = ExceptionHandlers.DescribeCurrentExceptionHit(); } catch { }
+                        return new { state = state.ToString(), bpHit, exceptionHit };
                     }
                     Thread.Sleep(50);
                 }

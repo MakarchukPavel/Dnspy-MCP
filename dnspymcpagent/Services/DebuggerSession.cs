@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using dndbg.Engine;
+using dndbg.COM.CorDebug;
 using dnSpy.Debugger.DotNet.CorDebug.Impl;
 using Microsoft.Diagnostics.Runtime;
 
@@ -38,6 +39,20 @@ public sealed class DebuggerSession : IDisposable
     public DateTime? LastExitUtc { get; private set; }
 
     public readonly BreakpointRegistry Breakpoints = new();
+
+    /// <summary>
+    /// Active managed-exception interception filter (null = disabled). Set by the
+    /// exception.break_set tool; consulted by <see cref="OnDebugCallback"/> on every
+    /// Exception2 callback. Cleared on Detach.
+    /// </summary>
+    public volatile ExceptionFilter? ExceptionInterception;
+
+    public sealed class ExceptionFilter
+    {
+        public string Mode = "by_type";   // all | unhandled | by_type
+        public string? TypeName;          // by_type: substring / FQN, case-insensitive
+        public bool FirstChance = true;   // all/by_type: stop at first-chance (true) else unhandled
+    }
 
     public DnDebugger DnDebugger =>
         _dnDebugger ?? throw new InvalidOperationException("Not attached. Call /tool/session/attach first.");
@@ -110,6 +125,19 @@ public sealed class DebuggerSession : IDisposable
                         ?? throw new InvalidOperationException("DnDebugger.OnAttachComplete event missing");
                     EventHandler handler = (_, _) => attachComplete.Set();
                     evt.AddEventHandler(dbg, handler);
+
+                    // Subscribe to the raw callback stream so we can implement
+                    // exception interception (break on a thrown managed exception).
+                    // Same Krafs.Publicizer/reflection route as OnAttachComplete
+                    // (direct += would hit CS0229 against the republished backing field).
+                    var cbEvt = typeof(DnDebugger).GetEvent("DebugCallbackEvent");
+                    var cbMethod = typeof(DebuggerSession).GetMethod(nameof(OnDebugCallback),
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                    if (cbEvt?.EventHandlerType != null && cbMethod != null)
+                    {
+                        var cb = Delegate.CreateDelegate(cbEvt.EventHandlerType, this, cbMethod);
+                        cbEvt.AddEventHandler(dbg, cb);
+                    }
                     return dbg;
                 }
                 catch (Exception ex)
@@ -310,8 +338,57 @@ public sealed class DebuggerSession : IDisposable
             _clrMdTarget = null;
 
             Breakpoints.Clear();
+            ExceptionInterception = null;
             Pid = null;
         }
+    }
+
+    // ---- exception interception ------------------------------------------
+    // Receives EVERY dndbg callback on the STA debugger thread. Acts only on
+    // Exception2 when a filter is armed: on a match it calls AddPauseReason,
+    // which makes dndbg's ShouldStopQueued keep the target paused at the throw
+    // — the exact mechanism dnSpy's DbgEngineImpl uses. ICorDebug calls here
+    // are safe because this fires on the STA thread.
+    private void OnDebugCallback(object sender, DebugCallbackEventArgs e)
+    {
+        var filter = ExceptionInterception;
+        if (filter is null) return;
+        if (e.Kind != DebugCallbackKind.Exception2) return;
+        try
+        {
+            var e2 = (Exception2DebugCallbackEventArgs)e;
+            bool isFirst = e2.EventType == CorDebugExceptionCallbackType.DEBUG_EXCEPTION_FIRST_CHANCE;
+            bool isUnhandled = e2.EventType == CorDebugExceptionCallbackType.DEBUG_EXCEPTION_UNHANDLED;
+            if (!isFirst && !isUnhandled) return; // ignore USER_FIRST_CHANCE / CATCH_HANDLER_FOUND
+
+            // Don't break on first-chance noise while a func-eval is running; always honor unhandled.
+            if (sender is DnDebugger d && d.IsEvaluating && !isUnhandled) return;
+
+            bool wantUnhandled = filter.Mode == "unhandled" || !filter.FirstChance;
+            if (wantUnhandled ? !isUnhandled : !isFirst) return;
+
+            if (filter.Mode == "by_type")
+            {
+                var name = TryGetExceptionTypeName(e2.CorThread?.CurrentException);
+                if (name is null) return; // can't confirm the type -> don't pause
+                if (!string.IsNullOrEmpty(filter.TypeName) &&
+                    name.IndexOf(filter.TypeName, StringComparison.OrdinalIgnoreCase) < 0)
+                    return;
+            }
+
+            e.AddPauseReason(isUnhandled ? DebuggerPauseReason.UnhandledException : DebuggerPauseReason.Exception);
+        }
+        catch { /* a throwing callback would kill the STA thread — swallow */ }
+    }
+
+    /// <summary>Full type name ("Ns.Type" / "Ns.Outer+Inner") of a thrown exception CorValue, or null.</summary>
+    internal static string? TryGetExceptionTypeName(CorValue? exObj)
+    {
+        var exactType = exObj?.ExactType;
+        if (exactType is null) return null;
+        var mdi = exactType.GetMetaDataImport(out uint token);
+        if (mdi is null) return null;
+        return MetaDataUtils.FullTypeName(mdi, token);
     }
 
     public string Describe()
