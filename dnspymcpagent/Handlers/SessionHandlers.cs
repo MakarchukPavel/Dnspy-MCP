@@ -98,7 +98,7 @@ public static class SessionHandlers
             });
 
         d.Register("session.jit_status",
-            "[DEBUG] Report which loaded modules are func-eval-ready. A module gets debuggable (un-optimized) JIT only if it loaded UNDER the debugger; a module already JITted before we attached stays optimized and func-eval on it fails with BAD_START_POINT. Use this to check whether e.g. Terrasoft.Core became debuggable after a recycle/app-domain reload while attached. Params: {pattern?:string (substring match, case-insensitive; omit for all)}. Returns {pattern, mode, count, modules:[{module, loadedUnderDebugger, funcEvalReady}]}.",
+            "[DEBUG] Report which loaded modules are func-eval-ready. A module gets debuggable (un-optimized) JIT only if it loaded UNDER the debugger; a module already JITted before we attached stays optimized and func-eval on it fails with BAD_START_POINT. Use this to check whether e.g. an app-private module became debuggable after a recycle/app-domain reload while attached. Params: {pattern?:string (substring match, case-insensitive; omit for all)}. Returns {pattern, mode, count, modules:[{module, loadedUnderDebugger, funcEvalReady}]}.",
             args => Program.Session.ModuleLoadStatus(Dispatcher.Opt<string?>(args, "pattern", null)));
 
         d.Register("session.touch_file",

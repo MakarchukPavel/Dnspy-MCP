@@ -500,7 +500,7 @@ public sealed class DebuggerSession : IDisposable
     /// module loaded under the debugger got the debuggable JIT flags, so
     /// func-eval works on it; a pre-existing module (already JITted optimized
     /// when we attached) does not. This is how a caller checks "did the
-    /// DISABLE_OPTIMIZATION flag actually take" for e.g. Terrasoft.Core.
+    /// DISABLE_OPTIMIZATION flag actually take" for e.g. an app-private assembly.
     /// </summary>
     public object ModuleLoadStatus(string? pattern)
     {

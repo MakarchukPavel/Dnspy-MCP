@@ -233,7 +233,7 @@ public static class HeapHandlers
             });
 
         d.Register("heap.static_field",
-            "[DEBUG] Read a STATIC field of a type via ClrMD — the entry point into singletons (e.g. AppManager.Instance, feature/cache statics). Statics are per-AppDomain. Params: {typeName:string (full type name, e.g. 'Terrasoft.Core.AppConnection'), fieldName:string, appDomainIndex?:int=-1 (default: first AppDomain where the field is initialized)}. Decoded like heap.read_object: primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address} to drill into with debug_heap_read_object. Returns {type, field, fieldType, appDomain, appDomainIndex, initialized, value}.",
+            "[DEBUG] Read a STATIC field of a type via ClrMD — the entry point into singletons (e.g. AppManager.Instance, feature/cache statics). Statics are per-AppDomain. Params: {typeName:string (full type name, e.g. 'MyApp.Core.AppConnection'), fieldName:string, appDomainIndex?:int=-1 (default: first AppDomain where the field is initialized)}. Decoded like heap.read_object: primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address} to drill into with debug_heap_read_object. Returns {type, field, fieldType, appDomain, appDomainIndex, initialized, value}.",
             p =>
             {
                 var typeName = Dispatcher.Req<string>(p, "typeName");

@@ -110,7 +110,7 @@ public static class LiveDebugTools
         => reg.Get(agent).Result("session.launch", new { exePath, args, workingDir })!;
 
     [McpServerTool(Name = "debug_jit_status")]
-    [Description("[DEBUG] Report which loaded modules are func-eval-ready. func-eval needs debuggable (un-optimized) JIT, which a module gets only if it loaded UNDER the debugger; a module already JITted before attach stays optimized (func-eval there fails with BAD_START_POINT). Workflow for func-eval on Release Creatio: debug_pid_attach to w3wp, then debug_touch_config (or recycle the app pool) to force an app-domain reload of app-private assemblies (e.g. Terrasoft.Core) WHILE attached, then call this to confirm 'loadedUnderDebugger':true before func-eval. Params: pattern (optional substring, e.g. 'Terrasoft.Core'); agent (optional).")]
+    [Description("[DEBUG] Report which loaded modules are func-eval-ready. func-eval needs debuggable (un-optimized) JIT, which a module gets only if it loaded UNDER the debugger; a module already JITted before attach stays optimized (func-eval there fails with BAD_START_POINT). Workflow for func-eval on Release/optimized builds: debug_pid_attach to the IIS worker (w3wp), then debug_touch_config (or recycle the app pool) to force an app-domain reload of app-private assemblies (e.g. MyApp.Core) WHILE attached, then call this to confirm 'loadedUnderDebugger':true before func-eval. Params: pattern (optional substring, e.g. 'MyApp.Core'); agent (optional).")]
     public static object JitStatus(AgentRegistry reg, string? pattern = null, string? agent = null)
         => reg.Get(agent).Result("session.jit_status", new { pattern })!;
 
@@ -274,7 +274,7 @@ public static class LiveDebugTools
     // ---- exception interception -----------------------------------------
 
     [McpServerTool(Name = "debug_exception_break_set")]
-    [Description("[DEBUG] Arm managed-exception interception: pause the target when an exception is thrown. mode: all | unhandled | by_type. typeName (for by_type; substring/full name, case-insensitive). firstChance=true stops at the throw; false waits for unhandled. excludeTypes: comma/semicolon-separated type-name substrings to IGNORE. WORKFLOW for an unknown bug amid noise (IIS/Creatio throw many first-chance internally): arm mode=all, then debug_exception_ignore_add each noisy type as it appears until debug_wait_paused goes quiet, then reproduce — the real exception (not ignored) pauses. Catch with debug_wait_paused (exceptionHit: type/message/hResult/unhandled/thread). Params: mode='by_type', typeName?, firstChance=true, excludeTypes?.")]
+    [Description("[DEBUG] Arm managed-exception interception: pause the target when an exception is thrown. mode: all | unhandled | by_type. typeName (for by_type; substring/full name, case-insensitive). firstChance=true stops at the throw; false waits for unhandled. excludeTypes: comma/semicolon-separated type-name substrings to IGNORE. WORKFLOW for an unknown bug amid noise (busy IIS apps throw many first-chance internally): arm mode=all, then debug_exception_ignore_add each noisy type as it appears until debug_wait_paused goes quiet, then reproduce — the real exception (not ignored) pauses. Catch with debug_wait_paused (exceptionHit: type/message/hResult/unhandled/thread). Params: mode='by_type', typeName?, firstChance=true, excludeTypes?.")]
     public static object ExceptionBreakSet(AgentRegistry reg, string mode = "by_type", string? typeName = null, bool firstChance = true, string? excludeTypes = null, string? agent = null)
         => reg.Get(agent).Result("exception.break_set", new { mode, typeName, firstChance, excludeTypes })!;
 
@@ -392,7 +392,7 @@ public static class LiveDebugTools
     }
 
     [McpServerTool(Name = "debug_heap_static_field")]
-    [Description("[DEBUG] Read a STATIC field of a type — the entry point into singletons / caches / feature toggles (e.g. read AppManager's instance static, then drill into the live object graph with debug_heap_read_object). Statics are per-AppDomain; by default reads the first AppDomain where the field is initialized. Value is decoded like debug_heap_read_object (primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address}). Params: typeName (FULL type name, e.g. 'Terrasoft.Core.AppConnection'), fieldName, appDomainIndex=-1 (or a specific index), agent (optional).")]
+    [Description("[DEBUG] Read a STATIC field of a type — the entry point into singletons / caches / feature toggles (e.g. read AppManager's instance static, then drill into the live object graph with debug_heap_read_object). Statics are per-AppDomain; by default reads the first AppDomain where the field is initialized. Value is decoded like debug_heap_read_object (primitive/enum/string/Guid/DateTime/struct inline; a reference returns {kind:object,type,address}). Params: typeName (FULL type name, e.g. 'MyApp.Core.AppConnection'), fieldName, appDomainIndex=-1 (or a specific index), agent (optional).")]
     public static object HeapStaticField(AgentRegistry reg, string typeName, string fieldName, int appDomainIndex = -1, string? agent = null)
         => reg.Get(agent).Result("heap.static_field", new { typeName, fieldName, appDomainIndex })!;
 

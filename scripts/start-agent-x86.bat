@@ -4,7 +4,7 @@ title dnspy-mcp agent (x86)
 
 REM ===========================================================
 REM  Starts the x86 (32-bit) dnspy-mcp DEBUG AGENT on port 5556.
-REM  Use to debug 32-bit .NET targets (older x86 Creatio, 32-bit
+REM  Use to debug 32-bit .NET targets (older x86 apps, 32-bit
 REM  IIS app pools). The debugger bitness MUST match the target's;
 REM  for x64 targets use start-agent.bat (:5555).
 REM  Connect the MCP host: debug_session_connect(host="127.0.0.1", port=5556)

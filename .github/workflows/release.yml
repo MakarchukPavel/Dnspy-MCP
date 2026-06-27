@@ -45,7 +45,13 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
+          # Use the curated notes as the release body. NOT generate_release_notes:
+          # that would auto-list commit titles on the Release page.
+          body_path: RELEASE_NOTES.md
+          # Use your PAT (secrets.RELEASE_TOKEN) when present; otherwise fall back
+          # to the built-in GITHUB_TOKEN (works for releases in this same repo via
+          # the contents:write permission above).
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           files: |
             ${{ steps.zipinfo.outputs.mcp }}
             ${{ steps.zipinfo.outputs.agent }}

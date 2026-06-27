@@ -311,7 +311,7 @@ pausing — non-interactive instrumentation. Pass `logExpressions` to
 
 ```
 debug_bp_set_by_name(
-    modulePath="Terrasoft.Core", typeFullName="...", methodName="...",
+    modulePath="MyApp.Core", typeFullName="...", methodName="...",
     logExpressions=["arg0.Id", "arg1.Name", "local2"],   # passive reads, same language as conditions
     logOnly=true,        # capture then auto-continue (no pause). default true when logExpressions set
     maxHits=200)         # hard cap: once reached, capturing stops
@@ -537,24 +537,24 @@ every module — but ICorDebug applies it **at module load**, so it only takes
 effect for modules that load *after* the debugger is present:
 
 - **Attaching to an already-running process** (`debug_pid_attach`): modules
-  already loaded (e.g. a warmed-up `w3wp`'s `Terrasoft.Core`) stay optimized →
+  already loaded (e.g. a warmed-up `w3wp`'s `MyApp.Core`) stay optimized →
   func-eval there fails with `CORDBG_E_FUNC_EVAL_BAD_START_POINT`. Passive
   tools still work fully; only func-eval is affected.
 - **Launching under the debugger** (`debug_launch`): the debugger is present
   before any module loads, so **all** modules are debuggable → func-eval works
   even on Release/optimized assemblies. Use this for any target you can start
   yourself (a console app, a service).
-- **IIS / Creatio**: you can't launch `w3wp` yourself. Best option: **deploy
+- **IIS apps**: you can't launch `w3wp` yourself. Best option: **deploy
   the build in Debug** (a normal `debug_pid_attach` then gives working
   func-eval — verified). Otherwise, force the target assemblies to **reload
   while you're attached** so they re-JIT debuggable:
 
   ```
   debug_pid_attach(pid=<w3wp>)
-  debug_jit_status(pattern="Terrasoft.Core")     # loadedUnderDebugger:false (pre-existing, optimized)
+  debug_jit_status(pattern="MyApp.Core")     # loadedUnderDebugger:false (pre-existing, optimized)
   debug_touch_config(path="…\\bin\\..\\web.config")  # bump web.config -> ASP.NET app-domain reload
   # (or recycle the app pool)
-  debug_jit_status(pattern="Terrasoft.Core")     # loadedUnderDebugger:true  -> func-eval ready
+  debug_jit_status(pattern="MyApp.Core")     # loadedUnderDebugger:true  -> func-eval ready
   ```
 
   `debug_touch_config` bumps a file's timestamp to trigger an app-domain reload;
@@ -636,7 +636,7 @@ disarms. This replaces the old trick of breakpointing an exception's `..ctor`.
 
 ### Finding an unknown exception amid noise
 
-A busy app (IIS / Creatio) throws **many** first-chance exceptions internally,
+A busy server app (e.g. on IIS) throws **many** first-chance exceptions internally,
 so `mode=all` alone is a firehose. The fix is a server-side **ignore list**:
 `debug_exception_ignore_add` drops a type so the agent skips it *without an
 MCP round-trip per throw* — the process keeps running at full speed.
