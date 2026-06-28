@@ -16,6 +16,12 @@ Two binaries:
 (no HTTP, no per-call headers, no reconnect storms). The debug session is
 opened once and stays warm until the MCP server exits.
 
+> **Driving it from chat:** the agent picks tools from your natural-language
+> request. For reliable, reproducible behavior — especially on a shared server —
+> see **[USAGE.md](USAGE.md)** for recommended request phrasings (catching an
+> exception on a live IIS app, inspecting state without restarting the pool, leak
+> hunting, and when func-eval actually needs a reload).
+
 ---
 
 ## Why two binaries?
